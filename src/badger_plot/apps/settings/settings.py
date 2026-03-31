@@ -3,18 +3,46 @@ import json
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget, 
-    QFormLayout, QCheckBox, QLineEdit, QPushButton, QLabel, 
+    QFormLayout, QLineEdit, QPushButton, QLabel, 
     QSlider, QFileDialog, QMessageBox, QComboBox, QApplication
 )
 from ui.theme import theme
+from ui.custom_widgets import ToggleSwitch # Import the new switch!
 
 class PreferencesDialog(QDialog):
     def __init__(self, main_window):
         super().__init__(main_window)
-        self.setWindowTitle("EggPlot Preferences")
-        self.setMinimumWidth(450)
+        self.setWindowTitle("EggSuite Global Settings")
+        self.setMinimumWidth(500)
         self.main_window = main_window
         self.settings = main_window.settings
+        
+        is_dark = self.settings.value("dark_mode", False, bool)
+        dis_border = "#555555" if is_dark else "#cccccc"
+        dis_text = "#777777" if is_dark else "#999999"
+        dis_bg = "#2a2a2a" if is_dark else "#f0f0f0"
+        
+        # Removed all QCheckBox entries from the stylesheet
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {theme.bg}; color: {theme.fg}; }}
+            QLabel {{ color: {theme.fg}; font-size: 13px; }}
+            QLabel:disabled {{ color: {dis_text}; }}
+            
+            QTabWidget::pane {{ border: 1px solid {theme.border}; background: {theme.panel_bg}; border-radius: 4px; }}
+            QTabBar::tab {{ background: {theme.bg}; color: {theme.fg}; padding: 8px 16px; border: 1px solid {theme.border}; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; margin-right: 2px; }}
+            QTabBar::tab:selected {{ background: {theme.primary_bg}; font-weight: bold; border: 1px solid {theme.primary_border}; border-bottom: none; }}
+            
+            QComboBox, QSpinBox, QSlider, QLineEdit {{
+                background-color: {theme.bg}; color: {theme.fg}; border: 1px solid {theme.border}; padding: 5px; border-radius: 3px;
+            }}
+            
+            QComboBox:disabled, QSpinBox:disabled, QLineEdit:disabled {{
+                background-color: {dis_bg}; color: {dis_text}; border: 1px solid {dis_border};
+            }}
+            
+            QPushButton {{ background-color: {theme.bg}; border: 1px solid {theme.border}; border-radius: 4px; padding: 6px; color: {theme.fg}; }}
+            QPushButton:hover {{ background-color: {theme.panel_bg}; }}
+        """)
         
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -26,7 +54,7 @@ class PreferencesDialog(QDialog):
         
         btn_box = QHBoxLayout()
         ok_btn = QPushButton("Save & Apply")
-        ok_btn.setStyleSheet(f"font-weight: bold; color: {theme.primary_text}; padding: 6px;")
+        ok_btn.setStyleSheet(f"font-weight: bold; background-color: {theme.primary_bg}; color: {theme.primary_text}; border: 1px solid {theme.primary_border}; padding: 6px 20px;")
         cancel_btn = QPushButton("Cancel")
         
         ok_btn.clicked.connect(self._on_save_clicked)
@@ -43,13 +71,11 @@ class PreferencesDialog(QDialog):
         tab = QWidget()
         form = QFormLayout(tab)
         
-        # Mirror File Settings
-        self.mirror_subfolder = QCheckBox("Save Mirrors in /EggPlot_Output/ subfolder")
+        self.mirror_subfolder = ToggleSwitch("Save Mirrors in /EggPlot_Output/ subfolder")
         form.addRow("File Management:", self.mirror_subfolder)
         
-        form.addRow(QLabel("<hr>"))
+        form.addRow(QLabel("<hr style='border: 1px solid #ccc;'>"))
         
-        # Profile Management
         profile_lay = QHBoxLayout()
         btn_export = QPushButton("Export Profile")
         btn_import = QPushButton("Import Profile")
@@ -59,15 +85,13 @@ class PreferencesDialog(QDialog):
         profile_lay.addWidget(btn_import)
         form.addRow("Settings Profile:", profile_lay)
         
-        self.portable_mode = QCheckBox("Portable Mode (Save settings to local .ini file)")
-        self.portable_mode.setToolTip("Keeps settings in the app folder instead of the Windows Registry.")
+        self.portable_mode = ToggleSwitch("Portable Mode (Save settings to local .ini file)")
         form.addRow("", self.portable_mode)
         
-        form.addRow(QLabel("<hr>"))
+        form.addRow(QLabel("<hr style='border: 1px solid #ccc;'>"))
         
-        # Nuclear Option
         btn_reset = QPushButton("Reset to Factory Defaults")
-        btn_reset.setStyleSheet(f"color: {theme.danger_text}; font-weight: bold;")
+        btn_reset.setStyleSheet(f"color: {theme.danger_text}; font-weight: bold; border: 1px solid {theme.danger_border};")
         btn_reset.clicked.connect(self.factory_reset)
         form.addRow("Memory Wipe:", btn_reset)
         
@@ -76,87 +100,72 @@ class PreferencesDialog(QDialog):
     def _on_save_clicked(self):
         current_dyn = self.dynamic_res_cb.isChecked()
         current_mon = self.monitor_combo.currentData()
-        current_res = self.resolution_combo.currentData()
         
-        # 1. If we are in Fixed Mode AND the target monitor changed
         if not current_dyn and str(current_mon) != str(self.initial_monitor):
             ans = QMessageBox.question(
                 self, "Restart Required", 
-                "Changing the target monitor in Fixed Mode requires the programme to restart to apply the correct Windows scaling.\n\nWould you like to save and restart now?", 
+                "Changing the target monitor in Fixed Mode requires the suite to restart to apply the correct Windows scaling.\n\nWould you like to save and restart now?", 
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
-            
             if ans == QMessageBox.StandardButton.Yes:
                 self.requires_restart = True
                 self.accept()
             else:
-                # Revert UI back to original and abort the save
                 self.dynamic_res_cb.setChecked(self.initial_dynamic)
-                
                 idx_mon = self.monitor_combo.findData(self.initial_monitor)
                 if idx_mon >= 0: self.monitor_combo.setCurrentIndex(idx_mon)
-                    
-                idx_res = self.resolution_combo.findData(self.initial_resolution)
-                if idx_res >= 0: self.resolution_combo.setCurrentIndex(idx_res)
-                    
                 return 
-                
-        # 2. If they just toggled dynamic mode, or changed resolution on the same monitor
-        elif current_dyn != self.initial_dynamic or str(current_res) != str(self.initial_resolution):
-            self.requires_restart = False
-            self.accept()
-            
-        # 3. No display changes were made
         else:
             self.requires_restart = False
             self.accept()
             
     def _toggle_res_ui(self):
-        """ Greys out the display/resolution selectors if Dynamic Mode is active. """
         is_dynamic = self.dynamic_res_cb.isChecked()
         self.monitor_combo.setEnabled(not is_dynamic)
         self.resolution_combo.setEnabled(not is_dynamic)
+        
+        if hasattr(self, 'display_form'):
+            lbl_mon = self.display_form.labelForField(self.monitor_combo)
+            lbl_res = self.display_form.labelForField(self.resolution_combo)
+            if lbl_mon: lbl_mon.setEnabled(not is_dynamic)
+            if lbl_res: lbl_res.setEnabled(not is_dynamic)
 
     def _build_ui_tab(self):
         tab = QWidget()
-        form = QFormLayout(tab)
+        self.display_form = QFormLayout(tab) 
         
-        self.dark_mode = QCheckBox("Enable Dark Mode Theme (Requires Restart)")
-        form.addRow("Application Theme:", self.dark_mode)
+        self.dark_mode = ToggleSwitch("Enable Dark Mode Theme (Requires Restart)")
+        self.display_form.addRow("Application Theme:", self.dark_mode)
         
-        form.addRow(QLabel("<hr>"))
+        self.display_form.addRow(QLabel("<hr style='border: 1px solid #ccc;'>"))
         
-        # --- NEW: WINDOW TARGETING & RESOLUTION ---
-        self.dynamic_res_cb = QCheckBox("Enable dynamic resolution & free dragging")
+        self.dynamic_res_cb = ToggleSwitch("Enable dynamic resolution & free dragging")
         self.dynamic_res_cb.stateChanged.connect(self._toggle_res_ui)
-        form.addRow("Window Mode:", self.dynamic_res_cb)
+        self.display_form.addRow("Window Mode:", self.dynamic_res_cb)
         
         self.monitor_combo = QComboBox()
         self.screens = QApplication.screens()
         
         for i, screen in enumerate(self.screens):
-            # E.g., "Display 1 (1920x1080)"
             geom = screen.geometry()
             self.monitor_combo.addItem(f"Display {i + 1} ({geom.width()}x{geom.height()})", userData=i)
             
         self.resolution_combo = QComboBox()
         self.monitor_combo.currentIndexChanged.connect(self._update_resolutions)
         
-        form.addRow("Target Monitor:", self.monitor_combo)
-        form.addRow("Window Resolution:", self.resolution_combo)
+        self.display_form.addRow("Target Monitor:", self.monitor_combo)
+        self.display_form.addRow("Window Resolution:", self.resolution_combo)
         
-        form.addRow(QLabel("<hr>"))
-        # ------------------------------------------
-
+        self.display_form.addRow(QLabel("<hr style='border: 1px solid #ccc;'>"))
+        
         btn_restore_warnings = QPushButton("Restore all 'Are you sure?' warnings")
         btn_restore_warnings.clicked.connect(self.restore_warnings)
-        form.addRow("Safety Nets:", btn_restore_warnings)
+        self.display_form.addRow("Safety Nets:", btn_restore_warnings)
         
         self.tabs.addTab(tab, "UI & Experience")
 
     def _update_resolutions(self, index):
-        """ Dynamically updates available resolutions based on the selected monitor's physical pixels. """
-        self.resolution_combo.blockSignals(True) # Prevent recursive firing
+        self.resolution_combo.blockSignals(True) 
         self.resolution_combo.clear()
         
         if index < 0 or index >= len(self.screens): 
@@ -167,7 +176,6 @@ class PreferencesDialog(QDialog):
         avail_geom = target_screen.availableGeometry() 
         scale_factor = target_screen.devicePixelRatio()
         
-        # Calculate true physical workspace
         phys_w = int(avail_geom.width() * scale_factor)
         phys_h = int(avail_geom.height() * scale_factor)
         
@@ -191,7 +199,6 @@ class PreferencesDialog(QDialog):
         if idx >= 0:
             self.resolution_combo.setCurrentIndex(idx)
         else:
-            # FALLBACK: If the old resolution doesn't fit the new monitor, revert to Maximise
             self.resolution_combo.setCurrentIndex(0)
             
         self.resolution_combo.blockSignals(False)
@@ -200,11 +207,9 @@ class PreferencesDialog(QDialog):
         tab = QWidget()
         form = QFormLayout(tab)
         
-        self.disable_opengl = QCheckBox("Disable Hardware Acceleration (OpenGL)")
-        self.disable_opengl.setToolTip("Check this if 3D plots are crashing your graphics driver.")
+        self.disable_opengl = ToggleSwitch("Disable Hardware Acceleration (OpenGL)")
         form.addRow("Graphics:", self.disable_opengl)
         
-        # Polling Rate Slider
         poll_lay = QHBoxLayout()
         self.poll_slider = QSlider(Qt.Orientation.Horizontal)
         self.poll_slider.setRange(10, 120)
@@ -222,6 +227,7 @@ class PreferencesDialog(QDialog):
         
         self.tabs.addTab(tab, "Advanced / Performance")
 
+    # ... [The remaining methods (load_current_settings, factory_reset, etc.) stay exactly as they were] ...
     def load_current_settings(self):
         self.mirror_subfolder.setChecked(self.settings.value("mirror_subfolder", False, bool))
         self.portable_mode.setChecked(self.settings.value("portable_mode", False, bool))
@@ -231,7 +237,6 @@ class PreferencesDialog(QDialog):
         poll_rate = int(self.settings.value("crosshair_poll_rate", 60))
         self.poll_slider.setValue(poll_rate)
         
-        # --- Load Window Targeting & Store Initial States ---
         try:
             self.initial_monitor = int(self.settings.value("target_monitor", 0))
         except (ValueError, TypeError):
@@ -252,14 +257,11 @@ class PreferencesDialog(QDialog):
         else:
             self.initial_resolution = "MAX"
             
-        # --- NEW: Load dynamic state and apply greying out ---
         self.initial_dynamic = self.settings.value("dynamic_resolution", False, bool)
         self.dynamic_res_cb.setChecked(self.initial_dynamic)
-        self._toggle_res_ui()
-        # -----------------------------------------------------
-            
+        self._toggle_res_ui() 
+        
         self.requires_restart = False
-        # ----------------------------------------------------
 
     def restore_warnings(self):
         self.settings.setValue("suppress_rename_warning", False)
@@ -268,19 +270,18 @@ class PreferencesDialog(QDialog):
     def factory_reset(self):
         ans = QMessageBox.warning(
             self, "Factory Reset", 
-            "Are you sure you want to completely wipe all EggPlot settings, custom equations, and formatting defaults?\n\nThis cannot be undone.",
+            "Are you sure you want to completely wipe all EggSuite settings, custom equations, and formatting defaults?\n\nThis cannot be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if ans == QMessageBox.StandardButton.Yes:
             self.settings.clear()
-            QMessageBox.information(self, "Reset Complete", "Settings wiped. Please restart EggPlot.")
+            QMessageBox.information(self, "Reset Complete", "Settings wiped. Please restart the suite.")
             self.accept()
 
     def export_profile(self):
-        fname, _ = QFileDialog.getSaveFileName(self, "Export Profile", "EggPlot_Profile.json", "JSON Files (*.json)")
+        fname, _ = QFileDialog.getSaveFileName(self, "Export Profile", "EggSuite_Profile.json", "JSON Files (*.json)")
         if not fname: return
         
-        # Dump all QSettings to a dictionary
         data = {key: self.settings.value(key) for key in self.settings.allKeys()}
         try:
             with open(fname, 'w') as f:
@@ -312,5 +313,5 @@ class PreferencesDialog(QDialog):
             "crosshair_poll_rate": self.poll_slider.value(),
             "target_monitor": self.monitor_combo.currentData(),
             "target_resolution": self.resolution_combo.currentData(),
-            "dynamic_resolution": self.dynamic_res_cb.isChecked() # <--- ADD THIS
+            "dynamic_resolution": self.dynamic_res_cb.isChecked()
         }

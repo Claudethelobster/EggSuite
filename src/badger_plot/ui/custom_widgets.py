@@ -1,14 +1,96 @@
 # ui/custom_widgets.py
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, pyqtProperty, QPropertyAnimation, QEasingCurve
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QComboBox, 
     QPushButton, QHBoxLayout, QSpinBox, QDoubleSpinBox, QColorDialog,
     QLabel, QCheckBox, QTableWidget, QHeaderView, QTableWidgetItem, QLineEdit
 )
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QPainter, QColor, QPainterPath, QFontMetrics
 from ui.theme import theme
+
+
+class ToggleSwitch(QCheckBox):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        # Start position based on initial state
+        self._position = 1.0 if self.isChecked() else 0.0
+        
+        self.animation = QPropertyAnimation(self, b"position")
+        self.animation.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self.animation.setDuration(150)
+        
+        self.stateChanged.connect(self.setup_animation)
+
+    @pyqtProperty(float)
+    def position(self):
+        return self._position
+
+    @position.setter
+    def position(self, pos):
+        self._position = pos
+        self.update()
+
+    def setup_animation(self, value):
+        self.animation.stop()
+        self.animation.setEndValue(1.0 if value else 0.0)
+        self.animation.start()
+
+    def sizeHint(self):
+        fm = QFontMetrics(self.font())
+        text_width = fm.horizontalAdvance(self.text())
+        # 36px for track + 10px spacing = 46px offset
+        return QSize(46 + text_width, 24)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        is_enabled = self.isEnabled()
+        is_dark = QColor(theme.bg).lightness() < 128
+        
+        # Determine track colours based on theme
+        track_off = QColor("#555555") if is_dark else QColor("#cccccc")
+        
+        # --- NEW: Bolder, high-contrast blue for the active state ---
+        track_on = QColor("#3388ff") if is_dark else QColor("#0055ff")
+        # ------------------------------------------------------------
+        
+        if not is_enabled:
+            track_off = QColor("#333333") if is_dark else QColor("#e0e0e0")
+            track_on = QColor("#5577aa") # Faded blue
+
+        # Interpolate track colour for smooth animation
+        r = int(track_off.red() + (track_on.red() - track_off.red()) * self._position)
+        g = int(track_off.green() + (track_on.green() - track_off.green()) * self._position)
+        b = int(track_off.blue() + (track_on.blue() - track_off.blue()) * self._position)
+        current_track_color = QColor(r, g, b)
+
+        # Draw the pill track
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(current_track_color)
+        
+        y_offset = (self.height() - 20) // 2
+        track_path = QPainterPath()
+        track_path.addRoundedRect(0, y_offset, 36, 20, 10, 10)
+        p.drawPath(track_path)
+
+        # Draw the sliding thumb
+        thumb_color = QColor("#ffffff") if is_enabled else QColor("#aaaaaa")
+        p.setBrush(thumb_color)
+        
+        thumb_x = 2 + (self._position * 16)
+        p.drawEllipse(int(thumb_x), y_offset + 2, 16, 16)
+
+        # Draw the text label
+        if self.text():
+            text_color = QColor(theme.fg) if is_enabled else QColor("#777777")
+            p.setPen(text_color)
+            p.setFont(self.font())
+            p.drawText(QRect(46, 0, self.width() - 46, self.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.text())
 
 class CustomAxisItem(pg.AxisItem):
     """ Intercepts the tick drawing engine to display true logarithmic bunching and superscripts """

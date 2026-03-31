@@ -1548,13 +1548,6 @@ class BadgerLoopQtGraph(QMainWindow):
         self.concat_folder_action.setEnabled(False) # Disabled by default
         file_menu.addAction(self.concat_folder_action)
         # ---------------------
-        
-        # --- NEW: EDIT MENU ---
-        edit_menu = menubar.addMenu("Edit")
-        prefs_action = QAction("Preferences...", self)
-        prefs_action.triggered.connect(self.open_preferences)
-        edit_menu.addAction(prefs_action)
-        # ----------------------
     
         # Inspect Menu
         inspect_menu = menubar.addMenu("Inspect")
@@ -1687,39 +1680,6 @@ class BadgerLoopQtGraph(QMainWindow):
 
     def show_help(self):
         HelpDialog(self).exec()
-        
-    def open_preferences(self):
-        from apps.settings.settings import PreferencesDialog
-        dlg = PreferencesDialog(self)
-        
-        was_portable = self.settings.value("portable_mode", False, bool)
-        was_dark = self.settings.value("dark_mode", False, bool)
-        
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_settings = dlg.get_results()
-            
-            # ... (Keep your portable mode migration logic exactly the same) ...
-            
-            # Save the new values
-            for key, val in new_settings.items():
-                self.settings.setValue(key, val)
-                
-            # Check if the dialog requested a reboot (Monitor Change)
-            if getattr(dlg, 'requires_restart', False):
-                self._restart_programme()
-                return # Halt execution here so we don't process live updates
-                
-            # --- LIVE UPDATE: Apply window resolution changes instantly! ---
-            self._apply_window_sizing()
-            # ---------------------------------------------------------------
-                
-            # Apply live updates for crosshairs and themes
-            if hasattr(self, 'proxy'):
-                self.proxy.disconnect() 
-                self.proxy = pg.SignalProxy(self.plot_widget.scene().sigMouseMoved, rateLimit=new_settings["crosshair_poll_rate"], slot=self.mouse_moved)
-                
-            if new_settings["dark_mode"] != was_dark:
-                QMessageBox.information(self, "Restart Required", "Theme changes will fully take effect after you restart the programme.")
         
     def _restart_programme(self):
         """ Spawns a fresh instance of the application and brutally kills the current one. """

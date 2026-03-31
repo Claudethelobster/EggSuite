@@ -19,6 +19,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QSettings
+from PyQt6.QtGui import QPalette, QColor
 
 # Import Theme and new Core architecture
 from ui.theme import theme
@@ -27,6 +28,10 @@ from apps.hub.main_menu import HubWindow
 
 def main():
     app = QApplication(sys.argv)
+    
+    # --- NEW: Force the Fusion rendering engine ---
+    app.setStyle("Fusion")
+    # ----------------------------------------------
     
     # 1. Boot Theme Engine
     local_ini = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "settings.ini")
@@ -37,6 +42,31 @@ def main():
         
     is_dark = settings.value("dark_mode", False, bool)
     theme.update(is_dark)
+    
+    # --- NEW: SYNCHRONISE FUSION WITH YOUR THEME ---
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(theme.bg))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(theme.fg))
+    palette.setColor(QPalette.ColorRole.Base, QColor(theme.panel_bg))      # Inside of the checkbox
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(theme.bg))
+    palette.setColor(QPalette.ColorRole.Text, QColor(theme.fg))              # Colour of the tick!
+    palette.setColor(QPalette.ColorRole.Button, QColor(theme.panel_bg))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(theme.fg))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(theme.primary_bg))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.primary_text))
+    
+    # --- FIX: High-contrast checkbox borders ---
+    # In Dark Mode (is_dark=True), we use a light grey (#AAAAAA) so it pops against the dark panel.
+    # In Light Mode (is_dark=False), we use almost solid black (#222222) so it pops against the white panel.
+    strong_border = QColor("#AAAAAA") if is_dark else QColor("#222222")
+    
+    palette.setColor(QPalette.ColorRole.Dark, strong_border)
+    palette.setColor(QPalette.ColorRole.Shadow, strong_border)
+    palette.setColor(QPalette.ColorRole.Mid, strong_border)
+    # -------------------------------------------
+    
+    app.setPalette(palette)
+    # -----------------------------------------------
     
     # 2. Initialize the Global Memory
     workspace = GlobalWorkspace()

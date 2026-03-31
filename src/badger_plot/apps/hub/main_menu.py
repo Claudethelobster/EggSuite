@@ -4,16 +4,16 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSettings
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QListWidget, QFrame, QFileDialog, QMessageBox, QProgressDialog,
-    QCheckBox, QDialog
+    QDialog
 )
 
 from ui.theme import theme
+from ui.custom_widgets import ToggleSwitch # Ensure this is imported!
 from core.data_loader import DataLoaderThread
 from ui.dialogs.data_mgmt import FileImportDialog, CopyableErrorDialog
 
 class AppTile(QFrame):
-    """A custom clickable square tile for launching suite applications."""
-    launch_requested = pyqtSignal(bool) # Emits True if 'Open in separate window' is checked
+    launch_requested = pyqtSignal(bool) 
 
     def __init__(self, title, description, icon="📊", parent=None):
         super().__init__(parent)
@@ -26,14 +26,12 @@ class AppTile(QFrame):
 
         layout = QVBoxLayout(self)
         
-        # Top: Just the Icon now
         icon_lbl = QLabel(icon)
         icon_lbl.setStyleSheet("font-size: 40px; border: none; background: transparent;")
         layout.addWidget(icon_lbl)
 
         layout.addStretch()
 
-        # Middle: Text Elements
         title_lbl = QLabel(title)
         title_lbl.setWordWrap(True)
         title_lbl.setStyleSheet(f"font-size: 18px; font-weight: bold; border: none; background: transparent; color: {theme.primary_text};")
@@ -44,20 +42,22 @@ class AppTile(QFrame):
         
         layout.addWidget(title_lbl)
         layout.addWidget(desc_lbl)
-        
         layout.addSpacing(10)
         
-        # Bottom: The Popout Checkbox (Native Styling ensures the tick is visible)
-        self.popout_cb = QCheckBox("Open in separate window")
-        self.popout_cb.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.popout_cb.setStyleSheet(f"""
-            QCheckBox {{ font-size: 12px; font-weight: bold; color: {theme.fg}; background: transparent; border: none; }}
-        """)
+        # --- NEW: Implement the Toggle Switch ---
+        self.popout_cb = ToggleSwitch("Open in separate window")
+        
+        # Set the font directly in Python instead of CSS
+        font = self.popout_cb.font()
+        font.setPixelSize(12)
+        font.setBold(True)
+        self.popout_cb.setFont(font)
+        
         layout.addWidget(self.popout_cb)
+        # ----------------------------------------
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            # If the user clicked the actual frame (and not the checkbox), launch the app!
             if not self.popout_cb.geometry().contains(event.pos()):
                 self.launch_requested.emit(self.popout_cb.isChecked())
         super().mousePressEvent(event)
