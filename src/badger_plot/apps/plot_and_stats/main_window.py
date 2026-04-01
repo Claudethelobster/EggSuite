@@ -14,12 +14,13 @@ from PyQt6.QtWidgets import (
     QMessageBox, QProgressDialog, QListWidget, QGridLayout, 
     QButtonGroup, QApplication, QDialog, QFormLayout, QTextEdit,
     QCheckBox, QTabWidget, QFontComboBox, QSlider, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSpinBox
+    QHeaderView, QSpinBox, QMenu
 )
 
 # Core imports
 from core.data_loader import DataLoaderThread, CSVDataset, Dataset, BADGERLOOP_AVAILABLE
 from apps.plot_and_stats.plot_worker import PlotWorkerThread, BackgroundWorker
+from apps.plot_and_stats.popouts import MatplotlibPopout
 from core.constants import PHYSICS_CONSTANTS, GREEK_MAP
 from ui.theme import theme
 from core.file_editor import FileEditor
@@ -3300,7 +3301,9 @@ class BadgerLoopQtGraph(QMainWindow):
 
     def _build_ui(self):
         central = QWidget()
+        central.setObjectName("mainCentralWidget")
         self.setCentralWidget(central)
+        
         main = QHBoxLayout(central)
         
         self._build_settings_dialog()
@@ -3308,7 +3311,7 @@ class BadgerLoopQtGraph(QMainWindow):
         controls = QVBoxLayout()
         main.addLayout(controls, 0)
         
-        # --- NEW: WORKSPACE DROPDOWN ---
+        # --- WORKSPACE DROPDOWN ---
         if self.workspace:
             controls.addWidget(QLabel("<b>Active Workspace File:</b>"))
             self.workspace_combo = QComboBox()
@@ -3328,12 +3331,12 @@ class BadgerLoopQtGraph(QMainWindow):
         
         self.toggle_legend_btn = QPushButton("Toggle Legend")
         self.toggle_legend_btn.setCheckable(True)
-        self.toggle_legend_btn.setChecked(True) # Legend is visible by default
+        self.toggle_legend_btn.setChecked(True) 
         self.toggle_legend_btn.setStyleSheet(f"font-weight: bold; background-color: {theme.primary_bg}; border: 2px solid {theme.primary_border}; border-radius: 4px; padding: 6px; color: {theme.primary_text};")
         self.toggle_legend_btn.clicked.connect(self.toggle_legend)
         controls.addWidget(self.toggle_legend_btn)
         
-        # --- NEW: HISTOGRAM STATS TOGGLE ---
+        # --- HISTOGRAM STATS TOGGLE ---
         self.toggle_stats_btn = QPushButton("Toggle Histogram Stats")
         self.toggle_stats_btn.setCheckable(True)
         self.toggle_stats_btn.setChecked(True)
@@ -3343,7 +3346,7 @@ class BadgerLoopQtGraph(QMainWindow):
         controls.addWidget(self.toggle_stats_btn)
         # -----------------------------------
         
-        # --- NEW: LOOP AREAS TOGGLE ---
+        # --- LOOP AREAS TOGGLE ---
         self.toggle_loop_btn = QPushButton("Toggle Loop Areas")
         self.toggle_loop_btn.setCheckable(True)
         self.toggle_loop_btn.setChecked(True)
@@ -3480,10 +3483,10 @@ class BadgerLoopQtGraph(QMainWindow):
         self.heatmap_cmap.currentTextChanged.connect(self.plot)
         controls.addWidget(self.heatmap_cmap)
         
-        # --- NEW: MAIN UI SURFACE TOGGLE ---
+        # --- MAIN UI SURFACE TOGGLE ---
         self.gl_surface_main_btn = QPushButton("○ Surface View (Off)")
         self.gl_surface_main_btn.setCheckable(True)
-        self.gl_surface_main_btn.setVisible(False) # Hidden by default
+        self.gl_surface_main_btn.setVisible(False) 
         self.gl_surface_main_btn.clicked.connect(lambda checked: self._toggle_surface_mode(checked))
         controls.addWidget(self.gl_surface_main_btn)
         # -----------------------------------
@@ -3496,9 +3499,40 @@ class BadgerLoopQtGraph(QMainWindow):
         controls.addWidget(self.snap_toggle_btn)
         
         controls.addSpacing(10)
-        controls.addWidget(button("Plot", self.plot))
-        controls.addWidget(button("Save Plot", self.save_plot))
-        controls.addWidget(button("Export Plotted Data", self.export_plotted_data))
+        
+        # ==========================================
+        # --- NEW: RESTRUCTURED PLOT CONTROLS ---
+        # ==========================================
+        plot_controls_layout = QHBoxLayout()
+        
+        self.btn_center_plot = QPushButton("🎯 Centre Plot")
+        self.btn_center_plot.setStyleSheet(f"font-weight: bold; background-color: {theme.primary_bg}; color: {theme.primary_text}; padding: 6px; border: 1px solid {theme.primary_border}; border-radius: 4px;")
+        self.btn_center_plot.clicked.connect(self.plot) 
+        plot_controls_layout.addWidget(self.btn_center_plot)
+        
+        self.btn_plot_options = QPushButton("⚙️ Plot Options ▾")
+        self.btn_plot_options.setStyleSheet(f"font-weight: bold; padding: 6px; border: 1px solid {theme.border}; border-radius: 4px;")
+        
+        options_menu = QMenu(self)
+        options_menu.setStyleSheet(f"QMenu {{ background-color: {theme.panel_bg}; color: {theme.fg}; border: 1px solid {theme.border}; }} QMenu::item:selected {{ background-color: {theme.primary_bg}; }}")
+        
+        action_save = options_menu.addAction("💾 Save Current View (Image)")
+        action_save.triggered.connect(self.save_plot) 
+        
+        action_export = options_menu.addAction("📄 Export Plotted Data (CSV)")
+        action_export.triggered.connect(self.export_plotted_data) 
+        
+        options_menu.addSeparator()
+        
+        action_pop_mpl = options_menu.addAction("🪟 Open in New Window (Matplotlib)")
+        action_pop_mpl.triggered.connect(self._popout_matplotlib)
+        
+        self.btn_plot_options.setMenu(options_menu)
+        plot_controls_layout.addWidget(self.btn_plot_options)
+        
+        controls.addLayout(plot_controls_layout)
+        # ==========================================
+        
         controls.addStretch()
         
         self.func_details_btn = QPushButton("Function Details")
@@ -3506,7 +3540,7 @@ class BadgerLoopQtGraph(QMainWindow):
         self.func_details_btn.clicked.connect(self.show_function_details)
         controls.addWidget(self.func_details_btn)
 
-        # --- NEW: RESTORE PEAK FINDER MENU BUTTON ---
+        # --- RESTORE PEAK FINDER MENU BUTTON ---
         self.restore_peak_btn = QPushButton("Restore Peak Finder Menu")
         self.restore_peak_btn.setStyleSheet(f"font-weight: bold; background-color: {theme.warning_bg}; color: {theme.warning_text}; padding: 6px; border: 2px solid {theme.warning_border}; border-radius: 4px;")
         self.restore_peak_btn.clicked.connect(self._restore_peak_menu)
@@ -3524,7 +3558,7 @@ class BadgerLoopQtGraph(QMainWindow):
         self.save_function_btn.setVisible(False)
         controls.addWidget(self.save_function_btn)
         
-        # --- NEW: EXPORT FIT TO COLUMN BUTTON ---
+        # --- EXPORT FIT TO COLUMN BUTTON ---
         self.save_fit_col_btn = QPushButton("Export Fit to Column")
         self.save_fit_col_btn.clicked.connect(self.export_fit_to_column)
         self.save_fit_col_btn.setVisible(False)
@@ -3613,7 +3647,7 @@ class BadgerLoopQtGraph(QMainWindow):
         """)
         self.stats_label.hide()
 
-        # --- NEW: LOOP STATS HUD ---
+        # --- LOOP STATS HUD ---
         self.loop_stats_label = DraggableLabel(self.plot_wrapper)
         self.loop_stats_label.setStyleSheet(f"""
             background-color: {theme.success_bg}; 
@@ -3624,7 +3658,7 @@ class BadgerLoopQtGraph(QMainWindow):
         """)
         self.loop_stats_label.hide()
         # ---------------------------
-        # --- NEW: AREA UNDER CURVE HUD ---
+        # --- AREA UNDER CURVE HUD ---
         self.auc_stats_label = DraggableLabel(self.plot_wrapper)
         self.auc_stats_label.setStyleSheet(f"""
             background-color: {theme.warning_bg}; 
@@ -3647,6 +3681,11 @@ class BadgerLoopQtGraph(QMainWindow):
         # ---------------------------------
         
         self.proxy = pg.SignalProxy(self.plot_widget.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
+        
+    def _popout_matplotlib(self):
+        # Pass the whole window so the popout can read the UI settings
+        self._mpl_popout = MatplotlibPopout(self) 
+        self._mpl_popout.show()
         
     def go_home(self):
         """Hides the plotter and tells the Hub to reveal itself."""
@@ -4402,11 +4441,10 @@ class BadgerLoopQtGraph(QMainWindow):
         menu.aboutToShow.connect(fix_palette)
 
     def _apply_styles(self):
-        app = QApplication.instance()
         is_dark = self.settings.value("dark_mode", False, bool)
         theme.update(is_dark)
         
-        # --- NEW: WINDOWS 10/11 TITLE BAR HACK ---
+        # --- WINDOWS 10/11 TITLE BAR HACK ---
         try:
             import ctypes
             # 20 is DWMWA_USE_IMMERSIVE_DARK_MODE for Windows 11 and newer 10
@@ -4417,59 +4455,6 @@ class BadgerLoopQtGraph(QMainWindow):
         except Exception:
             pass
         # -----------------------------------------
-        
-        # --- DARK MODE ENGINE ---
-        if is_dark:
-            if app:
-                app.setStyle("Fusion")
-                dark_palette = QPalette()
-                dark_palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
-                dark_palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
-                dark_palette.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
-                dark_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
-                dark_palette.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.white)
-                dark_palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
-                dark_palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
-                dark_palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
-                dark_palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
-                dark_palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
-                dark_palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
-                dark_palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
-                dark_palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
-                app.setPalette(dark_palette)
-                
-            self.setStyleSheet("""
-                QPushButton { background-color: #444; border: 1px solid #666; border-radius: 4px; padding: 6px; color: white; }
-                QPushButton:hover:!disabled { background-color: #555; }
-                QPushButton:pressed:!disabled { background-color: #333; }
-                QPushButton:disabled { background-color: #333; color: #777; border: 1px solid #444; }
-                
-                QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background-color: #222; color: white; border: 1px solid #555; padding: 4px; }
-                QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background-color: #333; color: #777; border: 1px solid #444; }
-                
-                /* DARK MODE TAB STYLES */
-                QTabWidget::pane { border: 1px solid #555; background-color: #353535; }
-                QTabBar::tab { background-color: #2a2a2a; color: #888; padding: 8px 16px; border: 1px solid #555; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; margin-right: 2px; }
-                QTabBar::tab:selected { background-color: #444; color: white; border: 1px solid #0055ff; border-bottom: none; font-weight: bold; }
-                QTabBar::tab:hover:!selected { background-color: #3a3a3a; color: white; }
-            """)
-            return
-        # -----------------------------
-
-        # --- LIGHT MODE ENGINE ---
-        if app: 
-            app.setStyle("Fusion")
-            app.setPalette(app.style().standardPalette()) 
-            
-        self.setStyleSheet("""
-            QPushButton { background-color: #f5f5f5; border: 1px solid #8a8a8a; border-radius: 4px; padding: 6px; color: black; }
-            QPushButton:hover:!disabled { background-color: #e6e6e6; }
-            QPushButton:pressed:!disabled { background-color: #d0d0d0; }
-            QPushButton:disabled { background-color: #e0e0e0; color: #999; border: 1px solid #ccc; }
-            
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background-color: white; color: black; border: 1px solid #8a8a8a; padding: 4px; }
-            QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background-color: #f0f0f0; color: #999; border: 1px solid #ccc; }
-        """)
 
     def _init_3d_scene(self, data_bounds=None, scales=(1.0, 1.0, 1.0)):
         sx, sy, sz = scales
