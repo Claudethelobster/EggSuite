@@ -4846,6 +4846,22 @@ class BadgerLoopQtGraph(QMainWindow):
 
                 # --- 2. DISK FALLBACK: Read from hard drive if not in RAM ---
                 if not dataset_loaded_from_ram:
+                    
+                    # --- NEW: AUTO-DETECT OVERRIDE ---
+                    # Never blindly trust the settings.ini file! Sniff the real file.
+                    if os.path.isfile(self.last_file):
+                        try:
+                            with open(self.last_file, 'rb') as f:
+                                header_bytes = f.read(2000)
+                                if header_bytes.startswith(b'\x89HDF\r\n\x1a\n'):
+                                    self.file_type = "HDF5"
+                                else:
+                                    text_chunk = header_bytes.decode('utf-8', errors='ignore')
+                                    if "###OUTPUTS" in text_chunk or "###INPUTS" in text_chunk or "###DATA" in text_chunk:
+                                        self.file_type = "BadgerLoop"
+                        except Exception: pass
+                    # ---------------------------------
+                    
                     if self.file_type in ["MultiCSV", "CSV", "ConcatenatedCSV"]:
                         # Intercept directories and force them to MultiCSV
                         if self.file_type == "MultiCSV" or os.path.isdir(self.last_file):

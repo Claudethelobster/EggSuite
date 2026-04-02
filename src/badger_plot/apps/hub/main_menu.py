@@ -90,6 +90,8 @@ class HubWindow(QMainWindow):
         # --- UPGRADED: Tree Widget ---
         self.file_tree = QTreeWidget()
         self.file_tree.setHeaderHidden(True)
+        from PyQt6.QtWidgets import QAbstractItemView
+        self.file_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.file_tree.setIndentation(15)
         
         scroll_css = f"""
@@ -449,12 +451,41 @@ class HubWindow(QMainWindow):
         CopyableErrorDialog("Loading Error", "An error occurred while loading the data.", err_msg, self).exec()
 
     def _remove_selected_file(self):
-        item = self.file_tree.currentItem()
-        if item:
-            # We extract the exact filepath stored hidden in the UserRole
+        selected_items = self.file_tree.selectedItems()
+        if not selected_items:
+            return
+
+        # Collect all the unique paths the user highlighted
+        paths_to_remove = []
+        for item in selected_items:
             path = item.data(0, Qt.ItemDataRole.UserRole)
-            if path:
+            if path and path not in paths_to_remove:
+                paths_to_remove.append(path)
+
+        if not paths_to_remove:
+            return
+
+        # Optional: Ask for confirmation if they are deleting a massive batch
+        if len(paths_to_remove) > 1:
+            from PyQt6.QtWidgets import QMessageBox
+            ans = QMessageBox.question(
+                self, 
+                "Confirm Batch Removal", 
+                f"Are you sure you want to remove {len(paths_to_remove)} items from the workspace?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
+        # Tell the workspace to wipe them from memory
+        for path in paths_to_remove:
+            # Assuming your workspace has a remove_dataset or remove_item method
+            if hasattr(self.workspace, 'remove_dataset'):
                 self.workspace.remove_dataset(path)
+
+        # Refresh the UI
+        self._refresh_file_tree()
+        self.btn_remove.clearFocus()
 
     def _refresh_file_tree(self):
         self.file_tree.clear()
@@ -562,19 +593,20 @@ class HubWindow(QMainWindow):
             QMessageBox.critical(self, "Concatenation Error", f"Failed to concatenate files:\n{e}")
         
     def _on_tree_selection_changed(self):
-        """Dynamically enables the merge button only if a parent folder is selected."""
-        item = self.file_tree.currentItem()
-        if not item:
-            self.btn_merge_folder.setEnabled(False)
-            return
+        """Dynamically enables the merge button only if a single parent folder is selected."""
+        selected_items = self.file_tree.selectedItems()
+        
+        # If exactly one item is selected, check if it is a folder
+        if len(selected_items) == 1:
+            path = selected_items[0].data(0, Qt.ItemDataRole.UserRole)
+            info = self.workspace.get_item_info(path)
 
-        path = item.data(0, Qt.ItemDataRole.UserRole)
-        info = self.workspace.get_item_info(path)
-
-        # The stylesheet will automatically un-grey the button when this is set to True
-        if info and info["type"] == "folder":
-            self.btn_merge_folder.setEnabled(True)
+            if info and info["type"] == "folder":
+                self.btn_merge_folder.setEnabled(True)
+            else:
+                self.btn_merge_folder.setEnabled(False)
         else:
+            # Zero items, or multiple items selected: lock the button!
             self.btn_merge_folder.setEnabled(False)
 
     # ==========================================
