@@ -116,41 +116,63 @@ class MultiCSVDataset:
 
     def _load_all(self, delimiter, has_header):
         if delimiter == "auto": delimiter = ","
+        
+        import pandas as pd
 
         for i, filepath in enumerate(self.file_list):
-            with open(filepath, 'r', encoding='utf-8-sig', errors='ignore') as f:
-                lines = f.readlines()
-            
-            headers_found = False
-            sweep_data = []
-            
-            for line in lines:
-                clean_line = line.strip()
-                if not clean_line or clean_line.startswith("#"): continue
+            try:
+                # Use Pandas C-engine to prevent memory fragmentation
+                df = pd.read_csv(filepath, sep=delimiter, header=0 if has_header else None, comment='#', skipinitialspace=True)
                 
-                if has_header and not headers_found:
-                    if i == 0: # Only map columns from the first file
-                        row = next(csv.reader([clean_line], delimiter=delimiter))
-                        for col_idx, col_name in enumerate(row):
-                            self.column_names[col_idx] = col_name.strip()
-                        self.num_inputs = len(self.column_names)
-                    headers_found = True
-                    continue
+                if i == 0: # Only map columns from the first file
+                    headers = [str(c).strip() for c in df.columns] if has_header else [f"Column {j}" for j in range(len(df.columns))]
+                    for col_idx, h in enumerate(headers):
+                        self.column_names[col_idx] = h
+                    self.num_inputs = len(self.column_names)
                     
-                row = next(csv.reader([clean_line], delimiter=delimiter))
-                num_row = []
-                for val in row:
-                    try: num_row.append(float(val))
-                    except ValueError: num_row.append(np.nan)
-                sweep_data.append(num_row)
+                arr = df.to_numpy(dtype=np.float64)
+                self.sweeps.append(CSVSweep(arr, name=os.path.basename(filepath)))
+                self.num_points += arr.shape[0]
                 
-            arr = np.array(sweep_data, dtype=np.float64)
-            self.sweeps.append(CSVSweep(arr, name=os.path.basename(filepath)))
-            self.num_points += arr.shape[0]
-            
+            except Exception as e:
+                # Fallback to the line-by-line generator if Pandas hits a corrupted file
+                headers_found = False
+                sweep_data = []
+                with open(filepath, 'r', encoding='utf-8-sig', errors='ignore') as f:
+                    for line in f:
+                        clean_line = line.strip()
+                        if not clean_line or clean_line.startswith("#"): continue
+                        
+                        if has_header and not headers_found:
+                            if i == 0: 
+                                row = next(csv.reader([clean_line], delimiter=delimiter))
+                                for col_idx, col_name in enumerate(row):
+                                    self.column_names[col_idx] = col_name.strip()
+                                self.num_inputs = len(self.column_names)
+                            headers_found = True
+                            continue
+                            
+                        if '"' not in clean_line:
+                            try:
+                                num_row = [float(x) for x in clean_line.split(delimiter)]
+                                sweep_data.append(num_row)
+                                continue
+                            except ValueError: pass
+                                
+                        row = next(csv.reader([clean_line], delimiter=delimiter))
+                        num_row = []
+                        for val in row:
+                            try: num_row.append(float(val))
+                            except ValueError: num_row.append(np.nan)
+                        sweep_data.append(num_row)
+                        
+                arr = np.array(sweep_data, dtype=np.float64)
+                self.sweeps.append(CSVSweep(arr, name=os.path.basename(filepath)))
+                self.num_points += arr.shape[0]
+                
         self.num_sweeps = len(self.sweeps)
         if self.num_sweeps > 0:
-            self.data = np.vstack([s.data for s in self.sweeps]) # Flat fallback for legacy operations
+            self.data = np.vstack([s.data for s in self.sweeps]) 
         else:
             self.data = np.array([])
 
@@ -172,9 +194,39 @@ class CSVDataset:
     def _load_data(self, delimiter, has_header):
         if delimiter == "auto": delimiter = ","
         
+        # --- 1. QUICK SNIFF FOR CUSTOM SWEEPS ---
+        is_standard_csv = True
         with open(self.filename, 'r', encoding='utf-8-sig', errors='ignore') as f:
-            lines = f.readlines()
-            
+            for i, line in enumerate(f):
+                if i > 500: break # Only check the top of the file
+                if "Format: ConcatenatedCSV" in line or "--- Sweep" in line:
+                    is_standard_csv = False
+                    break
+
+        # --- 2. PANDAS C-ENGINE FAST PATH ---
+        if is_standard_csv:
+            try:
+                import pandas as pd
+                # Pandas handles the memory allocation in C, preventing Python kernel crashes
+                df = pd.read_csv(self.filename, sep=delimiter, header=0 if has_header else None, comment='#', skipinitialspace=True)
+                
+                headers = [str(c).strip() for c in df.columns] if has_header else [f"Column {j}" for j in range(len(df.columns))]
+                for i, h in enumerate(headers):
+                    self.column_names[i] = h
+                self.num_inputs = len(headers)
+                
+                arr = df.to_numpy(dtype=np.float64)
+                self.sweeps.append(CSVSweep(arr, name="Sweep 0"))
+                self.num_points = arr.shape[0]
+                self.num_sweeps = 1
+                self.data = arr
+                self.notes = ""
+                self.is_concatenated = False
+                return # Exit early, we are fully loaded!
+            except Exception as e:
+                print(f"Pandas fast-path failed, falling back to manual engine. Reason: {e}")
+
+        # --- 3. MANUAL PARSER (For Concatenated / Fallback) ---
         headers = []
         notes_lines = []
         current_sweep_data = []
@@ -182,57 +234,60 @@ class CSVDataset:
         
         self.is_concatenated = False
 
-        for line in lines:
-            clean_line = line.strip()
-            if not clean_line: continue
-            
-            if clean_line.startswith("#"):
-                # --- NEW FLAG DETECTION ---
-                if "Format: ConcatenatedCSV" in clean_line:
-                    self.is_concatenated = True
-                # --------------------------
+        with open(self.filename, 'r', encoding='utf-8-sig', errors='ignore') as f:
+            for line in f:
+                clean_line = line.strip()
+                if not clean_line: continue
+                
+                if clean_line.startswith("#"):
+                    if "Format: ConcatenatedCSV" in clean_line:
+                        self.is_concatenated = True
 
-                if "--- Sweep" in clean_line:
-                    if current_sweep_data:
-                        sweep_blocks.append(current_sweep_data)
-                        current_sweep_data = []
-                notes_lines.append(clean_line) # Keep all comments in notes
-                continue
-                
-            if has_header and not headers:
+                    if "--- Sweep" in clean_line:
+                        if current_sweep_data:
+                            sweep_blocks.append(current_sweep_data)
+                            current_sweep_data = []
+                    notes_lines.append(clean_line) 
+                    continue
+                    
+                if has_header and not headers:
+                    row = next(csv.reader([clean_line], delimiter=delimiter))
+                    headers = [h.strip() for h in row]
+                    continue
+                    
+                # Optimised fast-path for raw numerical data
+                if '"' not in clean_line:
+                    try:
+                        num_row = [float(x) for x in clean_line.split(delimiter)]
+                        current_sweep_data.append(num_row)
+                        continue
+                    except ValueError: pass
+                        
+                # Standard fallback for complex rows
                 row = next(csv.reader([clean_line], delimiter=delimiter))
-                headers = [h.strip() for h in row]
-                continue
+                num_row = []
+                for val in row:
+                    try: num_row.append(float(val))
+                    except ValueError: num_row.append(np.nan)
+                current_sweep_data.append(num_row)
                 
-            row = next(csv.reader([clean_line], delimiter=delimiter))
-            num_row = []
-            for val in row:
-                try: num_row.append(float(val))
-                except ValueError: num_row.append(np.nan)
-            current_sweep_data.append(num_row)
-            
         if current_sweep_data:
             sweep_blocks.append(current_sweep_data)
             
         self.notes = "\n".join(notes_lines)
-        
         if not headers and sweep_blocks and sweep_blocks[0]:
             headers = [f"Column {i}" for i in range(len(sweep_blocks[0][0]))]
             
         for i, h in enumerate(headers):
             self.column_names[i] = h
-            
         self.num_inputs = len(headers)
         
-        # Populate the sweeps list
         for i, block in enumerate(sweep_blocks):
             arr = np.array(block, dtype=np.float64)
             self.sweeps.append(CSVSweep(arr, name=f"Sweep {i}"))
             self.num_points += arr.shape[0]
             
         self.num_sweeps = len(self.sweeps)
-        
-        # Keep a flat version of the data for legacy operations
         if self.num_sweeps > 0:
             self.data = np.vstack([s.data for s in self.sweeps])
         else:

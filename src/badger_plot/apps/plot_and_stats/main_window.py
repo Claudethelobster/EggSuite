@@ -251,9 +251,6 @@ class BadgerLoopQtGraph(QMainWindow):
             
         self._update_uncert_visibility()
         
-        if hasattr(self, 'concat_folder_action'):
-            self.concat_folder_action.setEnabled(is_multi)
-        
     def toggle_csv_uncertainties(self):
         self.csv_uncerts_enabled = not getattr(self, 'csv_uncerts_enabled', False)
         
@@ -1524,31 +1521,12 @@ class BadgerLoopQtGraph(QMainWindow):
     def _build_menu(self):
         menubar = self.menuBar()
         
-        # --- NEW: HOME BUTTON ---
+        # --- HOME BUTTON ---
         if not getattr(self, 'is_popout', False):
             home_action = QAction("🏠 Home", self)
             home_action.triggered.connect(self.go_home)
             menubar.addAction(home_action)
         # ------------------------
-        
-        # --- NEW FILE MENU ---
-        file_menu = menubar.addMenu("File")
-        
-        open_action = QAction("Open File...", self)
-        open_action.triggered.connect(self.open_file)
-        file_menu.addAction(open_action)
-        
-        open_folder_action = QAction("Open Folder (Batch CSVs)...", self)
-        open_folder_action.triggered.connect(self.open_folder)
-        file_menu.addAction(open_folder_action)
-        
-        file_menu.addSeparator()
-        
-        self.concat_folder_action = QAction("Concatenate Loaded Folder into Single CSV...", self)
-        self.concat_folder_action.triggered.connect(self.concatenate_folder)
-        self.concat_folder_action.setEnabled(False) # Disabled by default
-        file_menu.addAction(self.concat_folder_action)
-        # ---------------------
     
         # Inspect Menu
         inspect_menu = menubar.addMenu("Inspect")
@@ -1576,9 +1554,7 @@ class BadgerLoopQtGraph(QMainWindow):
         # Fitting Menu (Saved as self so we can dynamically rebuild it)
         self.fitting_menu = menubar.addMenu("Fitting")
         
-        # --- NEW: Populate menus based on initial mode ---
         self._update_context_menus()
-        # -------------------------------------------------
 
         # Plot Mode Menu
         plot_mode_menu = menubar.addMenu("Plot Mode")
@@ -1907,12 +1883,36 @@ class BadgerLoopQtGraph(QMainWindow):
         self._show_actual_create_column_dialog()
         
     def _intercept_folder_edit(self, continue_callback):
-        """ Checks if a folder is loaded and prompts the user for safety preferences. """
+        """ Checks if a folder OR a child file is loaded and prompts for safety preferences. """
         orig_name = os.path.basename(self.dataset.filename)
         if orig_name.startswith("MIRROR_"):
             continue_callback()
             return
             
+        info = self.workspace.get_item_info(self.dataset.filename)
+        
+        # --- SCENARIO 1: They are editing a Child File ---
+        if info and info["type"] == "child":
+            parent_folder = info["parent"]
+            
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Mirror File Required")
+            msg.setText("You are modifying a file that belongs to a Batch Folder.\n\nWould you like to isolate this file, or duplicate the entire folder to preserve batch integrity?")
+            btn_single = msg.addButton("Mirror Single File", QMessageBox.ButtonRole.AcceptRole)
+            btn_folder = msg.addButton("Mirror Entire Folder", QMessageBox.ButtonRole.AcceptRole)
+            btn_cancel = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            
+            if msg.clickedButton() == btn_cancel: 
+                return
+            elif msg.clickedButton() == btn_single:
+                self._create_single_mirror(self.dataset.filename, continue_callback)
+            elif msg.clickedButton() == btn_folder:
+                # Tell the mirror engine to duplicate the PARENT folder, not the child file
+                self._create_mirror_folder(parent_folder, continue_callback)
+            return
+
+        # --- SCENARIO 2: They are editing a full Folder (MultiCSV) ---
         from ui.dialogs.data_mgmt import FolderEditChoiceDialog
         choice = FolderEditChoiceDialog(self).exec()
         if choice == 0: return 
@@ -1923,10 +1923,52 @@ class BadgerLoopQtGraph(QMainWindow):
             return
             
         if choice == 1:
-            self._create_mirror_folder(continue_callback)
+            self._create_mirror_folder(self.dataset.filename, continue_callback)
 
-    def _create_mirror_folder(self, callback):
-        orig_folder = self.dataset.filename
+    def _create_single_mirror(self, filepath, callback):
+        """Creates a standalone mirror of a single file and loads it."""
+        parent_dir = os.path.dirname(filepath)
+        filename = os.path.basename(filepath)
+        mirror_name = f"MIRROR_{filename}"
+        mirror_path = os.path.join(parent_dir, mirror_name)
+        
+        counter = 1
+        while os.path.exists(mirror_path):
+            mirror_name = f"MIRROR_{os.path.splitext(filename)[0]} ({counter}){os.path.splitext(filename)[1]}"
+            mirror_path = os.path.join(parent_dir, mirror_name)
+            counter += 1
+            
+        try:
+            self._write_csv_mirror_from_existing(filepath, mirror_path)
+            
+            opts = getattr(self, 'last_load_opts', {"type": "CSV", "delimiter": ",", "has_header": True})
+            opts["type"] = "CSV"
+            
+            self.progress_dialog = QProgressDialog("Loading Isolated Mirror...", "Cancel", 0, 100, self)
+            self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self.progress_dialog.show()
+            
+            def on_mirror_loaded(ds):
+                if hasattr(self, 'progress_dialog') and self.progress_dialog is not None:
+                    self.progress_dialog.accept()
+                    self.progress_dialog.deleteLater()
+                    self.progress_dialog = None
+                    
+                # Register the new isolated file into the workspace!
+                self.workspace.add_single_file(mirror_path, ds)
+                self._on_load_finished(ds, mirror_path, opts)
+                callback() 
+                
+            self.loader_thread = DataLoaderThread(mirror_path, opts)
+            self.loader_thread.progress.connect(self._update_progress_ui)
+            self.loader_thread.finished.connect(on_mirror_loaded)
+            self.loader_thread.error.connect(self._on_load_error)
+            self.loader_thread.start()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to create mirror:\n{e}")
+
+    def _create_mirror_folder(self, orig_folder, callback):
         parent_dir = os.path.dirname(orig_folder)
         folder_name = os.path.basename(orig_folder)
         
@@ -1941,16 +1983,24 @@ class BadgerLoopQtGraph(QMainWindow):
             
         try:
             os.makedirs(mirror_folder_path)
+            
+            # Extract the children from the workspace instead of self.dataset
+            # because self.dataset might just be a single child file right now!
+            folder_info = self.workspace.get_item_info(orig_folder)
+            original_files = folder_info["children"] if folder_info else []
+            
             new_file_list = []
-            for fpath in self.dataset.file_list:
+            for fpath in original_files:
                 fname = os.path.basename(fpath)
                 new_fpath = os.path.join(mirror_folder_path, f"MIRROR_{fname}")
                 self._write_csv_mirror_from_existing(fpath, new_fpath)
                 new_file_list.append(new_fpath)
                 
             opts = getattr(self, 'last_load_opts', {"type": "MultiCSV", "delimiter": ",", "has_header": True})
+            opts["type"] = "MultiCSV" # Ensure it definitely loads as a folder
             opts["file_list"] = new_file_list
             
+            from PyQt6.QtWidgets import QProgressDialog, QApplication
             self.progress_dialog = QProgressDialog("Building Mirror Folder...", "Cancel", 0, 100, self)
             self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
             self.progress_dialog.setCancelButton(None)
@@ -1958,9 +2008,22 @@ class BadgerLoopQtGraph(QMainWindow):
             QApplication.processEvents()
             
             def on_mirror_loaded(ds):
-                self._on_load_finished(ds, mirror_folder_path, opts)
-                callback() # Automatically continue to the math tool!
+                # Clean up the ghost dialog
+                if hasattr(self, 'progress_dialog') and self.progress_dialog is not None:
+                    self.progress_dialog.accept()
+                    self.progress_dialog.deleteLater()
+                    self.progress_dialog = None
+                    
+                # 1. Register the newly created folder into the global Hub workspace!
+                self.workspace.add_folder(mirror_folder_path, ds)
                 
+                # 2. Tell the plotter to switch its view over to it
+                self._on_load_finished(ds, mirror_folder_path, opts)
+                
+                # 3. Resume whatever math tool you were originally trying to open
+                callback() 
+                
+            from core.data_loader import DataLoaderThread
             self.loader_thread = DataLoaderThread(mirror_folder_path, opts)
             self.loader_thread.progress.connect(self._update_progress_ui)
             self.loader_thread.finished.connect(on_mirror_loaded)
@@ -1968,6 +2031,7 @@ class BadgerLoopQtGraph(QMainWindow):
             self.loader_thread.start()
             
         except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Error", f"Failed to create mirror folder:\n{e}")
 
     def _write_csv_mirror_from_existing(self, src, dest):
@@ -3313,11 +3377,30 @@ class BadgerLoopQtGraph(QMainWindow):
         
         # --- WORKSPACE DROPDOWN ---
         if self.workspace:
+            from PyQt6.QtWidgets import QMenu, QWidgetAction, QTreeWidget, QTreeWidgetItem
+            
             controls.addWidget(QLabel("<b>Active Workspace File:</b>"))
-            self.workspace_combo = QComboBox()
-            self.workspace_combo.setStyleSheet(f"background-color: {theme.panel_bg}; font-weight: bold; padding: 4px; border: 1px solid {theme.border};")
-            self.workspace_combo.currentIndexChanged.connect(self._on_workspace_combo_changed)
-            controls.addWidget(self.workspace_combo)
+            
+            self.workspace_btn = QPushButton("No Workspace File Selected ▾")
+            self.workspace_btn.setStyleSheet(f"text-align: left; background-color: {theme.panel_bg}; font-weight: bold; padding: 6px; border: 1px solid {theme.border}; border-radius: 4px;")
+            
+            self.workspace_menu = QMenu(self)
+            self.workspace_menu.setStyleSheet(f"QMenu {{ background-color: {theme.panel_bg}; border: 1px solid {theme.border}; }}")
+            
+            self.workspace_tree = QTreeWidget()
+            self.workspace_tree.setHeaderHidden(True)
+            self.workspace_tree.setMinimumWidth(350)
+            self.workspace_tree.setMinimumHeight(250)
+            self.workspace_tree.setStyleSheet(f"QTreeWidget {{ background-color: {theme.panel_bg}; color: {theme.fg}; border: none; outline: none; font-size: 13px; }} QTreeWidget::item:selected {{ background-color: {theme.primary_bg}; color: {theme.primary_text}; }}")
+            
+            tree_action = QWidgetAction(self)
+            tree_action.setDefaultWidget(self.workspace_tree)
+            self.workspace_menu.addAction(tree_action)
+            
+            self.workspace_btn.setMenu(self.workspace_menu)
+            self.workspace_tree.itemClicked.connect(self._on_workspace_tree_clicked)
+            
+            controls.addWidget(self.workspace_btn)
             controls.addSpacing(10)
         # -------------------------------
         
@@ -3693,35 +3776,89 @@ class BadgerLoopQtGraph(QMainWindow):
         self.home_requested.emit()
 
     def _on_workspace_updated(self, filename=None):
-        """Refreshes the dropdown when the Hub loads or removes a file."""
-        if not hasattr(self, 'workspace_combo'): return
+        """Refreshes the dropdown tree when the Hub loads or removes a file."""
+        if not hasattr(self, 'workspace_tree'): return
         
-        self.workspace_combo.blockSignals(True)
-        self.workspace_combo.clear()
+        self.workspace_tree.blockSignals(True)
+        self.workspace_tree.clear()
         
-        for fname in self.workspace.datasets.keys():
-            self.workspace_combo.addItem(os.path.basename(fname), fname)
+        from PyQt6.QtWidgets import QTreeWidgetItem
         
-        # Try to keep the currently viewed file selected
-        if self.dataset and self.dataset.filename in self.workspace.datasets:
-            idx = self.workspace_combo.findData(self.dataset.filename)
-            if idx >= 0: self.workspace_combo.setCurrentIndex(idx)
-        elif self.workspace.datasets:
-            self.workspace_combo.setCurrentIndex(0)
-            self._on_workspace_combo_changed() # Force load the first file
-            
-        self.workspace_combo.blockSignals(False)
+        for path, info in self.workspace.datasets.items():
+            if info["parent"] is None:
+                item = QTreeWidgetItem([f"📁 {info['name']}" if info["type"] == "folder" else f"📄 {info['name']}"])
+                item.setData(0, Qt.ItemDataRole.UserRole, path)
+                
+                if info["type"] == "folder":
+                    for child_path in info["children"]:
+                        child_info = self.workspace.get_item_info(child_path)
+                        if child_info:
+                            child_item = QTreeWidgetItem([f"📄 {child_info['name']}"])
+                            child_item.setData(0, Qt.ItemDataRole.UserRole, child_path)
+                            item.addChild(child_item)
+                            
+                self.workspace_tree.addTopLevelItem(item)
+                
+        self.workspace_tree.expandAll()
+        self.workspace_tree.blockSignals(False)
 
-    def _on_workspace_combo_changed(self):
-        """Triggered when the user selects a different file from the top dropdown."""
-        if self.workspace_combo.currentIndex() < 0: return
-        fname = self.workspace_combo.currentData()
-        ds = self.workspace.get_dataset(fname)
+        if self.dataset and self.dataset.filename in self.workspace.datasets:
+            self.workspace_btn.setText(f"Active: {os.path.basename(self.dataset.filename)} ▾")
+        elif self.workspace.datasets:
+            # Auto-select the first available top-level item if nothing is active
+            first_item = self.workspace_tree.topLevelItem(0)
+            if first_item:
+                self._on_workspace_tree_clicked(first_item, 0)
+        else:
+            self.workspace_btn.setText("No Workspace File Selected ▾")
+
+    def _on_workspace_tree_clicked(self, item, column):
+        """Triggered when the user selects a file or folder from the tree dropdown."""
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path: return
         
-        if ds:
-            # We bypass the loading thread and feed it directly into your existing finished handler!
+        self.workspace_menu.hide() 
+        self.workspace_btn.setText(f"Active: {item.text(0).replace('📁 ', '').replace('📄 ', '')} ▾")
+        
+        info = self.workspace.get_item_info(path)
+        if not info: return
+        
+        # LAZY LOADING: If it's a child file that hasn't been loaded into RAM yet, fetch it!
+        if info["type"] == "child" and info["dataset"] is None:
             opts = getattr(self, 'last_load_opts', {"type": "CSV", "delimiter": ",", "has_header": True})
-            self._on_load_finished(ds, fname, opts)
+            opts["type"] = "CSV" 
+            
+            self.progress_dialog = QProgressDialog("Loading Child File...", "Cancel", 0, 100, self)
+            self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self.progress_dialog.show()
+            
+            self.loader_thread = DataLoaderThread(path, opts)
+            self.loader_thread.progress.connect(self._update_progress_ui)
+            
+            # Use a lambda to inject the filepath and opts into the callback
+            self.loader_thread.finished.connect(lambda ds, p=path, o=opts: self._on_child_loaded(p, ds, o))
+            self.loader_thread.error.connect(self._on_load_error)
+            self.loader_thread.start()
+            return
+            
+        ds = self.workspace.get_dataset(path)
+        if ds:
+            opts = getattr(self, 'last_load_opts', {"type": "CSV", "delimiter": ",", "has_header": True})
+            if info["type"] == "folder": opts["type"] = "MultiCSV"
+            elif info["type"] == "child" or info["type"] == "file": opts["type"] = "CSV"
+            
+            self._on_load_finished(ds, path, opts)
+
+    def _on_child_loaded(self, filepath, dataset, opts):
+        """Callback for when a lazy-loaded child file finishes parsing."""
+        if hasattr(self, 'progress_dialog') and self.progress_dialog is not None:
+            self.progress_dialog.accept()
+            self.progress_dialog.deleteLater()
+            self.progress_dialog = None
+            
+        # Register the raw dataset into the Hub's memory so it doesn't need loading again
+        self.workspace.datasets[filepath]["dataset"] = dataset
+        self._on_load_finished(dataset, filepath, opts)
 
     def open_legend_customizer(self, legend_item):
         is_fit_legend = (legend_item == getattr(self, 'fit_legend', None))
@@ -4684,7 +4821,7 @@ class BadgerLoopQtGraph(QMainWindow):
         
         if self.plot_mode == "2D": self.plot_layout.setCurrentWidget(self.plot_wrapper)
         elif self.plot_mode == "3D" and OPENGL_AVAILABLE: self.plot_layout.setCurrentWidget(self.gl_widget)
-        elif self.plot_mode == "Heatmap": self.plot_layout.setCurrentWidget(self.plot_wrapper) # <--- FIXED
+        elif self.plot_mode == "Heatmap": self.plot_layout.setCurrentWidget(self.plot_wrapper) 
     
         if self.last_file and os.path.exists(self.last_file):
             try:
@@ -4692,37 +4829,59 @@ class BadgerLoopQtGraph(QMainWindow):
                 self.leg_opacity.setValue(int(self.settings.value("leg_opacity", 230)))
                 self.leg_border.setValue(float(self.settings.value("leg_border", 1.5)))
                 self.leg_spacing.setValue(int(self.settings.value("leg_spacing", 0)))
+                
                 # Retrieve saved load options
                 opts_str = self.settings.value("last_load_opts", "")
                 try: self.last_load_opts = json.loads(opts_str) if opts_str else {}
                 except Exception: self.last_load_opts = {}
 
-                if self.file_type == "MultiCSV":
-                    if "file_list" not in self.last_load_opts:
-                        raise ValueError("Missing file list for MultiCSV")
-                    from core.data_loader import MultiCSVDataset
-                    self.dataset = MultiCSVDataset(
-                        self.last_file, 
-                        self.last_load_opts["file_list"], 
-                        self.last_load_opts.get("delimiter", ","), 
-                        self.last_load_opts.get("has_header", True)
-                    )
-                elif self.file_type in ["CSV", "ConcatenatedCSV"]:
-                    from core.data_loader import CSVDataset
-                    self.dataset = CSVDataset(
-                        self.last_file,
-                        self.last_load_opts.get("delimiter", ","),
-                        self.last_load_opts.get("has_header", True)
-                    )
-                # --- NEW: ROUTE HDF5 FILES PROPERLY ON STARTUP ---
-                elif self.file_type == "HDF5":
-                    from core.data_loader import HDF5Dataset
-                    self.dataset = HDF5Dataset(self.last_file)
-                # -------------------------------------------------
-                else: 
-                    if os.path.isdir(self.last_file):
-                        raise IsADirectoryError("Expected a BadgerLoop file but got a directory.")
-                    self.dataset = Dataset(self.last_file)
+                # --- 1. RAM CHECK: Ask the Hub first! ---
+                dataset_loaded_from_ram = False
+                if hasattr(self, 'workspace') and self.workspace is not None:
+                    if self.last_file in self.workspace.datasets:
+                        cached_ds = self.workspace.get_dataset(self.last_file)
+                        if cached_ds is not None:
+                            self.dataset = cached_ds
+                            dataset_loaded_from_ram = True
+
+                # --- 2. DISK FALLBACK: Read from hard drive if not in RAM ---
+                if not dataset_loaded_from_ram:
+                    if self.file_type in ["MultiCSV", "CSV", "ConcatenatedCSV"]:
+                        # Intercept directories and force them to MultiCSV
+                        if self.file_type == "MultiCSV" or os.path.isdir(self.last_file):
+                            from core.data_loader import MultiCSVDataset
+                            self.dataset = MultiCSVDataset(
+                                self.last_file, 
+                                file_list=self.last_load_opts.get("file_list", []), 
+                                delimiter=self.last_load_opts.get("delimiter", ","), 
+                                has_header=self.last_load_opts.get("has_header", True)
+                            )
+                            if hasattr(self, 'workspace') and self.workspace is not None:
+                                self.workspace.add_folder(self.last_file, self.dataset)
+                        else:
+                            from core.data_loader import CSVDataset
+                            self.dataset = CSVDataset(
+                                self.last_file,
+                                self.last_load_opts.get("delimiter", ","),
+                                self.last_load_opts.get("has_header", True)
+                            )
+                            if hasattr(self, 'workspace') and self.workspace is not None:
+                                self.workspace.add_single_file(self.last_file, self.dataset)
+                    
+                    elif self.file_type == "HDF5":
+                        from core.data_loader import HDF5Dataset
+                        self.dataset = HDF5Dataset(self.last_file)
+                        if hasattr(self, 'workspace') and self.workspace is not None:
+                            self.workspace.add_single_file(self.last_file, self.dataset)
+                    
+                    else: 
+                        if os.path.isdir(self.last_file):
+                            raise IsADirectoryError("Expected a BadgerLoop file but got a directory.")
+                        from core.data_loader import Dataset
+                        self.dataset = Dataset(self.last_file)
+                        if hasattr(self, 'workspace') and self.workspace is not None:
+                            self.workspace.add_single_file(self.last_file, self.dataset)
+                # ---------------------------------
                     
                 self.populate_columns()
                 
@@ -4739,7 +4898,7 @@ class BadgerLoopQtGraph(QMainWindow):
                 if saved_series_str:
                     try:
                         restored_data = json.loads(saved_series_str)
-                        for mode in ["2D", "3D", "Heatmap", "Histogram"]:  # <-- Added Histogram
+                        for mode in ["2D", "3D", "Heatmap", "Histogram"]: 
                             if mode in restored_data and restored_data[mode]:
                                 for pair in restored_data[mode]:
                                     pair['x'] = min(pair.get('x', 0), max_idx)
@@ -4849,291 +5008,26 @@ class BadgerLoopQtGraph(QMainWindow):
     
         super().closeEvent(e)
 
-    def open_file(self):
-        self._is_plotting = False # --- EMERGENCY UNLOCK ---
-        if hasattr(self, 'plot_thread') and self.plot_thread.isRunning():
-            try: self.plot_thread.terminate()
-            except: pass
-        if hasattr(self, 'loader_thread') and self.loader_thread.isRunning():
-            try: self.loader_thread.terminate()
-            except: pass
-            
-        fname, _ = QFileDialog.getOpenFileName(self, "Open Data File", "", "All supported files (*.txt *.csv *.h5 *.hdf5);;Text files (*.txt);;CSV files (*.csv);;HDF5 files (*.h5 *.hdf5);;All files (*)")
-        if not fname: return
-
-        # ==========================================
-        # PRE-SCAN THE FILE TO AUTO-DETECT TYPE
-        # ==========================================
-        is_badgerloop_actual = False
-        is_hdf5_actual = False
-        detected_type = "CSV" # Default fallback
-        
-        try:
-            with open(fname, 'rb') as f:
-                header_bytes = f.read(2000)
-                
-                if header_bytes.startswith(b'\x89HDF\r\n\x1a\n'):
-                    is_hdf5_actual = True
-                    detected_type = "HDF5"
-                else:
-                    text_chunk = header_bytes.decode('utf-8', errors='ignore')
-                    if "###OUTPUTS" in text_chunk or "###INPUTS" in text_chunk or "###DATA" in text_chunk:
-                        is_badgerloop_actual = True
-                        detected_type = "BadgerLoop"
-        except Exception: pass
-        # ==========================================
-
-        # Pass the auto-detected type into the dialog!
-        dlg = FileImportDialog(self, detected_type=detected_type)
-        
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            opts = dlg.get_options()
-            
-            # --- The Mismatch Shields remain exactly the same! ---
-            if opts["type"] == "HDF5" and not is_hdf5_actual:
-                QMessageBox.critical(self, "Format Mismatch", "You selected 'HDF5', but this file does not appear to be a valid HDF5 binary.\n\nPlease select the correct File Type.")
-                return
-                
-            if opts["type"] != "HDF5" and is_hdf5_actual:
-                QMessageBox.critical(self, "Format Mismatch", "This appears to be an HDF5 binary file, but you selected another format.\n\nPlease open the file again and select 'HDF5' as the File Type.")
-                return
-
-            if opts["type"] == "CSV" and is_badgerloop_actual:
-                QMessageBox.critical(self, "Format Mismatch", "You selected 'CSV', but this appears to be a native BadgerLoop file.\n\nPlease open the file again and select 'BadgerLoop' as the File Type.")
-                return
-                
-            if opts["type"] == "BadgerLoop" and not is_badgerloop_actual:
-                QMessageBox.critical(self, "Format Mismatch", "You selected 'BadgerLoop', but this file is missing standard BadgerLoop headers (e.g., ###INPUTS, ###DATA). It is likely a standard CSV or text file.\n\nPlease open the file again and select 'CSV' as the File Type.")
-                return
-                
-            if opts["type"] == "CSV":
-                import csv
-                detected_delim = "," 
-                sniff_success = False
-                try:
-                    with open(fname, 'r', encoding='utf-8', errors='ignore') as f:
-                        sample_lines = []
-                        chars_read = 0
-                        for line in f:
-                            if not line.lstrip().startswith('#') and line.strip():
-                                sample_lines.append(line)
-                                chars_read += len(line)
-                            if chars_read > 4096: break
-                        sample = "".join(sample_lines)
-                        
-                        if sample.strip():
-                            sniffer = csv.Sniffer()
-                            possible_delims = ',\t; |'
-                            if opts["delimiter"] not in ["auto", ""] and len(opts["delimiter"]) == 1:
-                                possible_delims += opts["delimiter"]
-                            detected_delim = sniffer.sniff(sample, delimiters=possible_delims).delimiter
-                            sniff_success = True
-                except Exception: pass
-                    
-                if opts["delimiter"] == "auto":
-                    opts["delimiter"] = detected_delim
-                elif sniff_success and detected_delim != opts["delimiter"]:
-                    delim_names = {',': 'Comma', '\t': 'Tab', ';': 'Semicolon', ' ': 'Space', '|': 'Pipe'}
-                    det_name = delim_names.get(detected_delim, f"'{detected_delim}'")
-                    sel_name = delim_names.get(opts["delimiter"], f"'{opts['delimiter']}'")
-                    
-                    msg = QMessageBox(self)
-                    msg.setWindowTitle("Delimiter Mismatch")
-                    msg.setText(f"{sel_name} delimiter selected, but {det_name} delimiter detected.")
-                    msg.setInformativeText("How would you like to proceed?")
-                    
-                    btn_detected = msg.addButton(f"Use {det_name}", QMessageBox.ButtonRole.AcceptRole)
-                    btn_anyway = msg.addButton("Try Anyway", QMessageBox.ButtonRole.DestructiveRole)
-                    btn_cancel = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-                    msg.exec()
-                    
-                    if msg.clickedButton() == btn_cancel: return 
-                    elif msg.clickedButton() == btn_detected: opts["delimiter"] = detected_delim 
-
-            if getattr(self, 'progress_dialog', None) is not None:
-                try: self.progress_dialog.deleteLater()
-                except: pass
-            self.progress_dialog = QProgressDialog("Initializing...", "Cancel", 0, 100, self)
-            self.progress_dialog.setWindowTitle("Loading Data")
-            self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-            self.progress_dialog.setCancelButton(None) 
-            self.progress_dialog.setAutoClose(False)
-            self.progress_dialog.setMinimumDuration(0) 
-            self.progress_dialog.show()
-            QApplication.processEvents() 
-
-            self.loader_thread = DataLoaderThread(fname, opts)
-            self.loader_thread.progress.connect(self._update_progress_ui)
-            self.loader_thread.finished.connect(lambda ds: self._on_load_finished(ds, fname, opts))
-            self.loader_thread.error.connect(self._on_load_error)
-            self.loader_thread.start()
-            
-    def open_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(self, "Select Folder with CSVs")
-        if not folder_path: return
-
-        all_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.csv')]
-        if not all_files:
-            QMessageBox.warning(self, "No CSVs Found", "No CSV files were found in the selected folder.")
-            return
-        all_files.sort()
-
-        dlg = FileImportDialog(self)
-        dlg.file_type.setCurrentText("CSV")
-        dlg.file_type.setEnabled(False) 
-        
-        if dlg.exec() != QDialog.DialogCode.Accepted: return
-        opts = dlg.get_options()
-        
-        import csv
-        delim = opts["delimiter"]
-        if delim == "auto": delim = "," 
-        
-        signatures = {}
-        errors = []
-        
-        self.progress_dialog = QProgressDialog("Scanning folder signatures...", "Cancel", 0, len(all_files), self)
-        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self.progress_dialog.show()
-        
-        # --- PHASE 1: SCAN ALL FILES ---
-        for i, fname in enumerate(all_files):
-            if self.progress_dialog.wasCanceled(): return
-            self.progress_dialog.setValue(i)
-            
-            full_path = os.path.join(folder_path, fname)
-            try:
-                with open(full_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
-                    first_line = ""
-                    for line in f:
-                        if line.strip() and not line.strip().startswith('#'):
-                            first_line = line.strip()
-                            break
-                    
-                    if not first_line:
-                        errors.append((fname, "Empty or comments only"))
-                        continue
-                        
-                    row = next(csv.reader([first_line], delimiter=delim))
-                    sig = tuple(row) if opts["has_header"] else len(row)
-                    
-                    if sig not in signatures:
-                        signatures[sig] = []
-                    signatures[sig].append(full_path)
-            except Exception as e:
-                errors.append((fname, str(e)))
-
-        self.progress_dialog.setValue(len(all_files))
-        
-        if not signatures:
-            QMessageBox.critical(self, "Validation Failed", "No valid data found in the CSV files.")
-            return
-
-        # --- PHASE 2: TEMPLATE SELECTION ---
-        target_sig = None
-        if len(signatures) == 1:
-            target_sig = list(signatures.keys())[0] 
-        else:
-            sel_dlg = TemplateSelectionDialog(signatures, self)
-            if sel_dlg.exec() != QDialog.DialogCode.Accepted: return
-            target_sig = sel_dlg.get_selected_signature()
-            
-        valid_files = signatures[target_sig]
-        rejected_count = len(all_files) - len(valid_files)
-        
-        if rejected_count > 0:
-            msg = f"Loaded {len(valid_files)} files matching the selected template.\nIgnored {rejected_count} mismatched files.\n\n"
-            if errors:
-                msg += "Some files had read errors:\n"
-                for r in errors[:5]: msg += f"- {r[0]}: {r[1]}\n"
-                if len(errors) > 5: msg += "..."
-            QMessageBox.information(self, "Validation Summary", msg)
-
-        # --- PHASE 3: FIRE UP MULTI-LOADER ---
-        opts["type"] = "MultiCSV"
-        opts["file_list"] = valid_files
-        
-        self.progress_dialog.setLabelText("Stitching files in memory...")
-        self.progress_dialog.setValue(0)
-        
-        self.loader_thread = DataLoaderThread(folder_path, opts)
-        self.loader_thread.progress.connect(self._update_progress_ui)
-        self.loader_thread.finished.connect(lambda ds: self._on_load_finished(ds, folder_path, opts))
-        self.loader_thread.error.connect(self._on_load_error)
-        self.loader_thread.start()
-
-    def concatenate_folder(self):
-        if self.file_type != "MultiCSV" or not self.dataset: return
-        
-        save_path, _ = QFileDialog.getSaveFileName(self, "Save Concatenated CSV", os.path.dirname(self.dataset.filename), "CSV files (*.csv)")
-        if not save_path: return
-        if not save_path.lower().endswith('.csv'): save_path += '.csv'
-        
-        delim = getattr(self, 'last_load_opts', {}).get("delimiter", ",")
-        if delim == "auto": delim = ","
-        
-        try:
-            self.progress_dialog = QProgressDialog("Concatenating files...", "Cancel", 0, len(self.dataset.file_list), self)
-            self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-            self.progress_dialog.show()
-            
-            with open(save_path, 'w', encoding='utf-8-sig', newline='') as out_f:
-                # Write Master Metadata
-                out_f.write("# Format: ConcatenatedCSV\n")
-                out_f.write("# Is Mirror File: Yes\n")
-                out_f.write(f"# Concatenated from folder: {os.path.basename(self.dataset.filename)}\n")
-                
-                header_line = delim.join([self.dataset.column_names[i] for i in range(self.dataset.num_inputs)])
-                out_f.write(header_line + "\n")
-                
-                for i, filepath in enumerate(self.dataset.file_list):
-                    if self.progress_dialog.wasCanceled():
-                        out_f.close()
-                        os.remove(save_path)
-                        return
-                    self.progress_dialog.setValue(i)
-                    
-                    # INJECT THE SWEEP MARKER
-                    out_f.write(f"# --- Sweep {i} (File: {os.path.basename(filepath)}) ---\n")
-                    
-                    with open(filepath, 'r', encoding='utf-8-sig', errors='ignore') as in_f:
-                        lines = in_f.readlines()
-                        
-                    header_skipped = not getattr(self, 'last_load_opts', {}).get("has_header", True) 
-                    
-                    for line in lines:
-                        clean_line = line.strip()
-                        if not clean_line or clean_line.startswith("#"): continue
-                        if not header_skipped:
-                            header_skipped = True
-                            continue
-                        out_f.write(clean_line + "\n")
-            
-            self.progress_dialog.setValue(len(self.dataset.file_list))
-            
-            # Instantly load the brand-new concatenated file!
-            opts = {"type": "CSV", "delimiter": delim, "has_header": True}
-            self.loader_thread = DataLoaderThread(save_path, opts)
-            self.loader_thread.progress.connect(self._update_progress_ui)
-            self.loader_thread.finished.connect(lambda ds: self._on_load_finished(ds, save_path, opts))
-            self.loader_thread.error.connect(self._on_load_error)
-            self.loader_thread.start()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Concatenation Error", f"Failed to concatenate files:\n{e}")
-
     def _update_progress_ui(self, percent, text):
         if hasattr(self, 'progress_dialog') and self.progress_dialog is not None:
             self.progress_dialog.setLabelText(text)
             self.progress_dialog.setValue(percent)
 
     def _on_load_finished(self, dataset, fname, opts):
+        import copy
         try:
-            # --- FIX: Only update the dialog if the Plotter actually created one ---
+            # --- 1. CACHE CURRENT STATE BEFORE SWAPPING ---
+            if getattr(self, 'dataset', None) is not None and getattr(self, 'workspace', None) is not None:
+                old_path = self.dataset.filename
+                if old_path in self.workspace.datasets:
+                    self.workspace.datasets[old_path]["series_data"] = copy.deepcopy(getattr(self, 'series_data', {}))
+                    self.workspace.datasets[old_path]["plot_mode"] = getattr(self, 'plot_mode', '2D')
+            # ----------------------------------------------
+            
+            # Update the dialog text (it will be destroyed at the end of this function)
             if getattr(self, 'progress_dialog', None) is not None:
                 self.progress_dialog.setLabelText("File loaded. Preparing plot...")
-            # -------------------------------------------------------------------
-            
+                
             self.file_type = opts["type"]
             if getattr(dataset, 'is_concatenated', False):
                 self.file_type = "ConcatenatedCSV"
@@ -5164,8 +5058,25 @@ class BadgerLoopQtGraph(QMainWindow):
                 "z_name": dataset.column_names.get(min(2, max_idx), "Z")
             }
             
+            # --- 2. RESTORE CACHED STATE OR GENERATE DEFAULTS ---
+            info = self.workspace.get_item_info(fname) if hasattr(self, 'workspace') else None
+
+            if info and "series_data" in info:
+                self.series_data = copy.deepcopy(info["series_data"])
+                if "plot_mode" in info:
+                    self.plot_mode = info["plot_mode"]
+                    self.set_plot_mode(self.plot_mode)
+            else:
+                self.series_data = {
+                    "2D": [dict(default_pair)], 
+                    "3D": [dict(default_pair)], 
+                    "Heatmap": [dict(default_pair)], 
+                    "Histogram": [dict(default_pair)]
+                }
+
+            # Safety boundary check (in case file changed externally)
             for mode in ["2D", "3D", "Heatmap", "Histogram"]:  
-                if getattr(self, 'series_data', None) and self.series_data.get(mode):
+                if self.series_data.get(mode):
                     for pair in self.series_data[mode]:
                         pair['x'] = min(pair.get('x', 0), max_idx)
                         pair['y'] = min(pair.get('y', 0), max_idx)
@@ -5173,9 +5084,7 @@ class BadgerLoopQtGraph(QMainWindow):
                         pair['x_name'] = dataset.column_names.get(pair['x'], "X")
                         pair['y_name'] = dataset.column_names.get(pair['y'], "Y")
                         pair['z_name'] = dataset.column_names.get(pair['z'], "Z")
-                else:
-                    if not hasattr(self, 'series_data'): self.series_data = {}
-                    self.series_data[mode] = [dict(default_pair)]
+            # ----------------------------------------------------
 
             self.update_file_mode_ui()
             current_pair = self.series_data[self.plot_mode][0]
@@ -5190,9 +5099,19 @@ class BadgerLoopQtGraph(QMainWindow):
             self.custom_axis_labels = {"bottom": None, "left": None, "top": None, "right": None}
             self.plot()
             
+            # --- 3. BRUTALLY DESTROY GHOST DIALOG ---
+            if getattr(self, 'progress_dialog', None) is not None:
+                self.progress_dialog.accept()
+                self.progress_dialog.deleteLater()
+                self.progress_dialog = None
+            # ----------------------------------------
+            
         except Exception as e:
             if getattr(self, 'progress_dialog', None) is not None: 
-                try: self.progress_dialog.accept()
+                try: 
+                    self.progress_dialog.accept()
+                    self.progress_dialog.deleteLater()
+                    self.progress_dialog = None
                 except: pass
             import traceback
             from PyQt6.QtWidgets import QMessageBox

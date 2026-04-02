@@ -3,7 +3,7 @@ import os
 import re
 import numpy as np
 from datetime import datetime
-from PyQt6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex
+from PyQt6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QThread, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
@@ -1015,3 +1015,234 @@ class TemplateSelectionDialog(QDialog):
         
     def get_selected_signature(self):
         return self.sig_mapping[self.list_widget.currentRow()]
+    
+class BatchSnifferThread(QThread):
+    progress = pyqtSignal(int, str, str, bool)
+    finished_sniffing = pyqtSignal()
+
+    def __init__(self, file_paths):
+        super().__init__()
+        self.file_paths = file_paths
+
+    def run(self):
+        import csv
+        import os
+        for row, path in enumerate(self.file_paths):
+            f_type = "CSV"
+            delim = "Comma (,)"
+            has_header = True
+
+            try:
+                with open(path, 'rb') as f:
+                    header_bytes = f.read(4096)
+                    if header_bytes.startswith(b'\x89HDF\r\n\x1a\n'):
+                        f_type = "HDF5"
+                    else:
+                        text_chunk = header_bytes.decode('utf-8', errors='ignore')
+                        if "###OUTPUTS" in text_chunk or "###INPUTS" in text_chunk or "###DATA" in text_chunk:
+                            f_type = "BadgerLoop"
+                        elif text_chunk.strip():
+                            lines = [l for l in text_chunk.splitlines() if l.strip() and not l.strip().startswith('#')]
+                            if lines:
+                                sample = "\n".join(lines[:5])
+                                sniffer = csv.Sniffer()
+                                dialect = sniffer.sniff(sample, delimiters=',\t; |')
+                                delim_map_rev = {',': 'Comma (,)', '\t': 'Tab', ';': 'Semicolon (;)', ' ': 'Space'}
+                                delim = delim_map_rev.get(dialect.delimiter, "Comma (,)")
+                                has_header = sniffer.has_header(sample)
+            except Exception:
+                pass
+
+            # Send the results back to the main UI thread
+            self.progress.emit(row, f_type, delim, has_header)
+            
+        self.finished_sniffing.emit()
+
+class BatchImportDialog(QDialog):
+    def __init__(self, file_paths, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Batch Import Manager")
+        self.resize(850, 500)
+        self.file_paths = file_paths
+
+        layout = QVBoxLayout(self)
+
+        lbl = QLabel(f"Configuring import options for {len(file_paths)} files.\nThe programme is attempting to auto-detect the correct settings for each file.")
+        lbl.setStyleSheet(f"color: {theme.fg}; margin-bottom: 10px;")
+        layout.addWidget(lbl)
+
+        # --- BULK OVERRIDE PANEL ---
+        bulk_group = QGroupBox("Bulk Override")
+        bulk_group.setStyleSheet(f"QGroupBox {{ font-weight: bold; border: 1px solid {theme.border}; border-radius: 6px; margin-top: 10px; padding-top: 15px; background-color: {theme.bg}; }} QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; padding: 0 5px; left: 10px; color: {theme.fg}; }}")
+        bulk_layout = QHBoxLayout(bulk_group)
+        
+        self.bulk_type = QComboBox()
+        self.bulk_type.addItems(["BadgerLoop", "CSV", "HDF5"])
+        if not globals().get('BADGERLOOP_AVAILABLE', True):
+            self.bulk_type.model().item(0).setEnabled(False)
+            self.bulk_type.setCurrentIndex(1)
+            
+        self.bulk_delim = QComboBox()
+        self.bulk_delim.addItems(["Comma (,)", "Tab", "Semicolon (;)", "Space"])
+        
+        self.bulk_header = QCheckBox("Has Header")
+        self.bulk_header.setChecked(True)
+        
+        btn_apply_bulk = QPushButton("Apply to All")
+        btn_apply_bulk.setStyleSheet(f"background-color: {theme.primary_bg}; color: {theme.primary_text}; border: 1px solid {theme.primary_border}; border-radius: 4px; padding: 4px 10px;")
+        btn_apply_bulk.clicked.connect(self.apply_bulk_settings)
+
+        bulk_layout.addWidget(QLabel("Type:", styleSheet=f"color: {theme.fg};"))
+        bulk_layout.addWidget(self.bulk_type)
+        bulk_layout.addWidget(QLabel("Delimiter:", styleSheet=f"color: {theme.fg};"))
+        bulk_layout.addWidget(self.bulk_delim)
+        bulk_layout.addWidget(self.bulk_header)
+        bulk_layout.addStretch()
+        bulk_layout.addWidget(btn_apply_bulk)
+        
+        layout.addWidget(bulk_group)
+
+        # --- THE FILE TABLE ---
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["File Name", "Type", "Delimiter", "Has Header"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.setAlternatingRowColors(True)
+        self.table.setStyleSheet(f"alternate-background-color: {theme.bg}; background-color: {theme.panel_bg}; color: {theme.fg};")
+        layout.addWidget(self.table)
+
+        btn_box = QHBoxLayout()
+        self.btn_ok = QPushButton("Scanning...")
+        self.btn_ok.setEnabled(False) # Lock until scanning finishes
+        self.btn_ok.setStyleSheet(f"font-weight: bold; background-color: {theme.primary_bg}; color: {theme.primary_text}; padding: 6px; border: 1px solid {theme.primary_border}; border-radius: 4px;")
+        self.btn_ok.clicked.connect(self.accept)
+        
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setStyleSheet(f"padding: 6px; border: 1px solid {theme.border}; border-radius: 4px; color: {theme.fg};")
+        btn_cancel.clicked.connect(self.reject)
+        
+        btn_box.addStretch()
+        btn_box.addWidget(self.btn_ok)
+        btn_box.addWidget(btn_cancel)
+        layout.addLayout(btn_box)
+
+        self.bulk_type.currentTextChanged.connect(self._toggle_bulk_csv_options)
+        self._toggle_bulk_csv_options(self.bulk_type.currentText())
+
+        self.populate_empty_table()
+
+        # Fire up the background thread
+        self.sniffer_thread = BatchSnifferThread(self.file_paths)
+        self.sniffer_thread.progress.connect(self._update_row_settings)
+        self.sniffer_thread.finished_sniffing.connect(self._on_sniffing_finished)
+        self.sniffer_thread.start()
+
+    def _toggle_bulk_csv_options(self, text):
+        is_csv = (text == "CSV")
+        self.bulk_delim.setEnabled(is_csv)
+        self.bulk_header.setEnabled(is_csv)
+
+    def apply_bulk_settings(self):
+        b_type = self.bulk_type.currentText()
+        b_delim = self.bulk_delim.currentText()
+        b_head = self.bulk_header.isChecked()
+
+        for row in range(self.table.rowCount()):
+            type_combo = self.table.cellWidget(row, 1)
+            delim_combo = self.table.cellWidget(row, 2).findChild(QComboBox)
+            head_check = self.table.cellWidget(row, 3).findChild(QCheckBox)
+
+            type_combo.setCurrentText(b_type)
+            if b_type == "CSV":
+                delim_combo.setCurrentText(b_delim)
+                head_check.setChecked(b_head)
+
+    def populate_empty_table(self):
+        from PyQt6.QtWidgets import QHBoxLayout
+        self.table.setRowCount(len(self.file_paths))
+
+        for row, path in enumerate(self.file_paths):
+            fname = os.path.basename(path)
+            name_item = QTableWidgetItem(fname)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, 0, name_item)
+
+            type_combo = QComboBox()
+            type_combo.addItems(["BadgerLoop", "CSV", "HDF5"])
+            if not globals().get('BADGERLOOP_AVAILABLE', True):
+                type_combo.model().item(0).setEnabled(False)
+            type_combo.setCurrentText("CSV")
+            type_combo.setEnabled(False) # Locked while scanning
+
+            delim_widget = QWidget()
+            delim_layout = QHBoxLayout(delim_widget)
+            delim_layout.setContentsMargins(4, 2, 4, 2)
+            delim_combo = QComboBox()
+            delim_combo.addItems(["Comma (,)", "Tab", "Semicolon (;)", "Space"])
+            delim_combo.setEnabled(False)
+            delim_layout.addWidget(delim_combo)
+
+            head_widget = QWidget()
+            head_layout = QHBoxLayout(head_widget)
+            head_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            head_layout.setContentsMargins(0, 0, 0, 0)
+            head_check = QCheckBox()
+            head_check.setEnabled(False)
+            head_layout.addWidget(head_check)
+
+            self.table.setCellWidget(row, 1, type_combo)
+            self.table.setCellWidget(row, 2, delim_widget)
+            self.table.setCellWidget(row, 3, head_widget)
+
+            def on_type_changed(text, d_box=delim_combo, h_box=head_widget):
+                is_csv = (text == "CSV")
+                d_box.setVisible(is_csv)
+                h_box.setVisible(is_csv)
+
+            type_combo.currentTextChanged.connect(lambda t, d=delim_combo, h=head_widget: on_type_changed(t, d, h))
+
+    def _update_row_settings(self, row, f_type, delim, has_header):
+        type_combo = self.table.cellWidget(row, 1)
+        delim_combo = self.table.cellWidget(row, 2).findChild(QComboBox)
+        head_check = self.table.cellWidget(row, 3).findChild(QCheckBox)
+
+        type_combo.setEnabled(True)
+        delim_combo.setEnabled(True)
+        head_check.setEnabled(True)
+
+        if not globals().get('BADGERLOOP_AVAILABLE', True) and f_type == "BadgerLoop":
+            f_type = "CSV"
+            
+        type_combo.setCurrentText(f_type)
+        delim_combo.setCurrentText(delim)
+        head_check.setChecked(has_header)
+
+    def _on_sniffing_finished(self):
+        self.btn_ok.setEnabled(True)
+        self.btn_ok.setText("Import All")
+
+    def get_options_list(self):
+        opts_list = []
+        delim_map = {"Comma (,)": ",", "Tab": "\t", "Semicolon (;)": ";", "Space": " "}
+
+        for row in range(self.table.rowCount()):
+            type_combo = self.table.cellWidget(row, 1)
+            delim_combo = self.table.cellWidget(row, 2).findChild(QComboBox)
+            head_check = self.table.cellWidget(row, 3).findChild(QCheckBox)
+
+            f_type = type_combo.currentText()
+            if f_type == "CSV":
+                delim_char = delim_map.get(delim_combo.currentText(), ",")
+                has_head = head_check.isChecked()
+            else:
+                delim_char = ","
+                has_head = True
+
+            opts_list.append({
+                "filepath": self.file_paths[row],
+                "type": f_type,
+                "delimiter": delim_char,
+                "has_header": has_head
+            })
+            
+        return opts_list
