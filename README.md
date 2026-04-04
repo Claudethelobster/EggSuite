@@ -13,10 +13,12 @@ Like last time, this program was made using the Gemini Pro 3.1 model. Feel free 
 
 # Installing
 > [!NOTE]
-> Simplest way to run the software is to download the repo and run `src/badger_plot/__main__.py`.
+> Simplest way to run the software is to download the repo and run `src/egg_suite/__main__.py`.
 For more freedom of use, best to install the package.
+>
+> I would also recommend creating a fresh environment for this, most IDEs see PyQt6 and freak out!
 
-Can be installed into a and python environment using:
+Can be installed into a python environment using:
 ```powershell
 pip install "git+https://github.com/Claudethelobster/EggSuite"
 ```
