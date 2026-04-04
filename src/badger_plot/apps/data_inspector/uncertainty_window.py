@@ -1,4 +1,4 @@
-# ui/dialogs/uncertainty_window.py
+# app/data_inspector/uncertainty_window.py
 import re
 import io
 import numpy as np
@@ -7,7 +7,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView,
-    QComboBox, QWidget, QScrollArea, QTabWidget, QFormLayout
+    QComboBox, QWidget, QScrollArea, QTabWidget, QFormLayout,
+    QLineEdit
 )
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -47,20 +48,28 @@ class UncertaintyCalculatorDialog(QDialog):
         self._build_tab_custom()
         
         self.tabs.currentChanged.connect(self.update_preview)
+        
 
         # 3. Action Buttons
         btn_box = QHBoxLayout()
-        self.calc_btn = QPushButton("Calculate & Save Column")
-        self.calc_btn.setStyleSheet(f"font-weight: bold; background-color: {theme.primary_bg}; color: {theme.primary_text}; padding: 8px; border-radius: 4px;")
-        self.calc_btn.setEnabled(False)
+        
+        btn_box.addWidget(QLabel("<b>Output Column Name:</b>"))
+        self.output_name_input = QLineEdit("Calculated_Error")
+        self.output_name_input.setFixedWidth(200)
+        btn_box.addWidget(self.output_name_input)
+        
+        btn_box.addStretch()
         
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setStyleSheet("padding: 8px;")
         cancel_btn.clicked.connect(self.reject)
-        
-        btn_box.addStretch()
         btn_box.addWidget(cancel_btn)
+
+        self.calc_btn = QPushButton("⚙️ Calculate & Save")
+        self.calc_btn.setStyleSheet(f"font-weight: bold; background-color: {theme.primary_bg}; color: {theme.primary_text}; padding: 8px 15px; border: 1px solid {theme.primary_border}; border-radius: 4px;")
+        self.calc_btn.clicked.connect(self._run_calculation)
         btn_box.addWidget(self.calc_btn)
+        
         self.main_layout.addLayout(btn_box)
 
         # Trigger initial preview
@@ -705,6 +714,11 @@ class UncertaintyCalculatorDialog(QDialog):
             num_clean = strip_parens(numerator)
             den_clean = strip_parens(denominator)
 
+            # --- FIX: Protect against dangling fractions during live-typing ---
+            if not num_clean: num_clean = "~"
+            if not den_clean: den_clean = "~"
+            # ------------------------------------------------------------------
+
             replace_str = r"\frac{" + num_clean + r"}{" + den_clean + r"}"
             text = text[:num_start] + replace_str + text[den_end+1:]
 
@@ -729,3 +743,205 @@ class UncertaintyCalculatorDialog(QDialog):
         text = re.sub(r'\^(\s+)', r'^{}\1', text)
 
         return text, None
+    
+    def _run_calculation(self):
+        import numpy as np
+        from PyQt6.QtWidgets import QMessageBox
+        import copy
+        import os
+        import glob
+        
+        out_name = self.output_name_input.text().strip()
+        if not out_name:
+            QMessageBox.warning(self, "Missing Output Name", "Please provide a name for the new output column.")
+            return
+
+        # Grab the Pandas DataFrame from the parent window
+        parent_win = self.parent()
+        df = parent_win.df
+        current_tab = self.tabs.currentIndex()
+        
+        try:
+            if current_tab == 0:
+                # ==========================================
+                # TAB 0: PURE NUMPY VECTORISED STANDARD MATH
+                # ==========================================
+                mode = self.standard_combo.currentText()
+                is_powers_on = self.power_switch.isChecked()
+                term_arrays = []
+                
+                for row in range(self.standard_table.rowCount()):
+                    data_cb = self.standard_table.cellWidget(row, 0)
+                    err_cb = self.standard_table.cellWidget(row, 1)
+                    exp_edit = self.standard_table.cellWidget(row, 2)
+                    
+                    if err_cb.currentIndex() <= 0: continue
+                        
+                    err_col_name = err_cb.currentText().split(": ")[-1]
+                    err_arr = df[err_col_name].to_numpy(dtype=float)
+                    
+                    if data_cb.currentIndex() > 0:
+                        data_col_name = data_cb.currentText().split(": ")[-1]
+                        data_arr = df[data_col_name].to_numpy(dtype=float)
+                    else:
+                        data_arr = np.ones_like(err_arr)
+                    
+                    exp_text = exp_edit.text().strip() if is_powers_on else ""
+                    try:
+                        if not exp_text: n_val = 1.0
+                        elif "/" in exp_text:
+                            from fractions import Fraction
+                            n_val = float(Fraction(exp_text.replace(" ", "")))
+                        else: n_val = float(exp_text)
+                    except Exception: n_val = 1.0
+
+                    if "Quadrature" in mode or "Worst-Case" in mode:
+                        term = err_arr if n_val == 1.0 else n_val * np.power(data_arr, n_val - 1) * err_arr
+                    elif "Fractional" in mode:
+                        term = n_val * (err_arr / data_arr)
+                    
+                    term_arrays.append(term)
+
+                if not term_arrays:
+                    QMessageBox.warning(self, "No Data", "Please map at least one uncertainty column.")
+                    return
+
+                if "Quadrature" in mode or "Fractional" in mode:
+                    squared_sum = sum(np.power(t, 2) for t in term_arrays)
+                    final_result = np.sqrt(squared_sum)
+                elif "Worst-Case" in mode:
+                    final_result = sum(np.abs(t) for t in term_arrays)
+
+                df[out_name] = final_result
+
+            elif current_tab == 1:
+                # ==========================================
+                # TAB 1: UNCERTAINTIES MODULE (DERIVATIVES)
+                # ==========================================
+                from uncertainties import unumpy
+                
+                raw_text = self.general_input.toPlainText().strip()
+                if not raw_text: return
+                
+                # 1. Build the safe math environment for unumpy
+                safe_env = {
+                    'sin': unumpy.sin, 'cos': unumpy.cos, 'tan': unumpy.tan,
+                    'arcsin': unumpy.arcsin, 'arccos': unumpy.arccos, 'arctan': unumpy.arctan,
+                    'sinh': unumpy.sinh, 'cosh': unumpy.cosh, 'tanh': unumpy.tanh,
+                    'exp': unumpy.exp, 'log': unumpy.log, 'ln': unumpy.log,
+                    'sqrt': unumpy.sqrt, 'abs': abs, 'pi': np.pi, 'e': np.e
+                }
+                
+                # 2. Extract variables and map them to ufloat arrays
+                vars_detected = list(set(re.findall(r'\[(.*?)\]', raw_text)))
+                parsed_eq = raw_text.replace('^', '**') # Python uses ** for powers
+                
+                for i, var in enumerate(vars_detected):
+                    base_arr = df[var].to_numpy(dtype=float)
+                    
+                    # Find the mapped error column from the table
+                    err_col = None
+                    for row in range(self.general_table.rowCount()):
+                        if self.general_table.item(row, 0).text() == f"[{var}]":
+                            combo = self.general_table.cellWidget(row, 1)
+                            if combo.currentIndex() > 0:
+                                err_col = combo.currentText().split(": ")[-1]
+                            break
+                            
+                    err_arr = df[err_col].to_numpy(dtype=float) if err_col else np.zeros_like(base_arr)
+                    
+                    # Create the unumpy array and inject it into the environment!
+                    var_name = f"var_{i}"
+                    safe_env[var_name] = unumpy.uarray(base_arr, err_arr)
+                    parsed_eq = parsed_eq.replace(f"[{var}]", var_name)
+                    
+                # 3. Evaluate the expression
+                u_result = eval(parsed_eq, {"__builtins__": {}}, safe_env)
+                
+                # 4. Extract just the standard deviations (the propagated error!)
+                df[out_name] = unumpy.std_devs(u_result)
+
+            elif current_tab == 2:
+                # ==========================================
+                # TAB 2: PURE NUMPY (CUSTOM FORMULA)
+                # ==========================================
+                raw_text = self.custom_input.toPlainText().strip()
+                if not raw_text: return
+                
+                safe_env = {
+                    'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
+                    'arcsin': np.arcsin, 'arccos': np.arccos, 'arctan': np.arctan,
+                    'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
+                    'exp': np.exp, 'log': np.log, 'ln': np.log,
+                    'sqrt': np.sqrt, 'abs': np.abs, 'pi': np.pi, 'e': np.e
+                }
+                
+                vars_detected = list(set(re.findall(r'\[(.*?)\]', raw_text)))
+                parsed_eq = raw_text.replace('^', '**')
+                
+                for i, var in enumerate(vars_detected):
+                    var_name = f"var_{i}"
+                    safe_env[var_name] = df[var].to_numpy(dtype=float)
+                    parsed_eq = parsed_eq.replace(f"[{var}]", var_name)
+                    
+                df[out_name] = eval(parsed_eq, {"__builtins__": {}}, safe_env)
+            
+            # ==========================================
+            # FINAL SAVE ROUTINE (MIRROR FILE LOGIC)
+            # ==========================================
+            dataset = parent_win.current_dataset
+            fname = dataset.filename
+            orig_name = os.path.basename(fname)
+            directory = os.path.dirname(fname)
+            
+            if not orig_name.startswith("MIRROR_"):
+                name_only, ext = os.path.splitext(orig_name)
+                search_pattern = os.path.join(directory, f"MIRROR_{name_only}*{ext}")
+                existing_mirrors = [os.path.basename(p) for p in glob.glob(search_pattern)]
+                
+                max_num = max([int(m.group(1)) for m in [re.search(r'\((\d+)\)', x) for x in existing_mirrors] if m] + [1 if f"MIRROR_{orig_name}" in existing_mirrors else 0])
+                mirror_name = f"MIRROR_{name_only} ({max_num + 1}){ext}" if existing_mirrors else f"MIRROR_{orig_name}"
+                target_file = os.path.join(directory, mirror_name)
+                
+                QMessageBox.information(self, "Mirror Created", f"To protect original data, your calculations have been saved to a Mirror file:\n{mirror_name}")
+            else:
+                target_file = fname
+                
+            df.to_csv(target_file, index=False, encoding='utf-8-sig')
+            
+            if target_file != fname:
+                new_dataset = copy.deepcopy(dataset)
+                new_dataset.data = df.to_numpy()
+                
+                num_existing_cols = len(new_dataset.column_names)
+                new_dataset.column_names[num_existing_cols] = out_name
+                new_dataset.num_inputs += 1 
+                new_dataset.num_points = len(df)
+                new_dataset.filename = target_file
+                
+                if hasattr(parent_win.workspace, 'add_single_file'):
+                    parent_win.workspace.add_single_file(target_file, new_dataset)
+                else:
+                    parent_win.workspace.datasets[target_file] = {
+                        "name": os.path.basename(target_file), "type": "file", 
+                        "parent": None, "children": [], "dataset": new_dataset
+                    }
+                    
+                parent_win.current_dataset = new_dataset
+                parent_win.workspace_btn.setText(f"Active: {os.path.basename(target_file)} ▾")
+                parent_win.workspace.dataset_added.emit(target_file)
+            else:
+                dataset.data = df.to_numpy()
+                num_existing_cols = len(dataset.column_names)
+                dataset.column_names[num_existing_cols] = out_name
+                dataset.num_inputs += 1
+                dataset.num_points = len(df)
+            
+            parent_win.table_model.set_dataframe(df)
+            parent_win.df = df
+            parent_win.stats_label.setText(f"Rows: {len(df):,} | Columns: {len(df.columns)}")
+            
+            self.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Calculation Error", f"A mathematical error occurred during processing:\n\n{str(e)}\n\nCheck for division by zero, invalid powers, or unmapped columns.")
