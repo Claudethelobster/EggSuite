@@ -20,11 +20,11 @@ dependencies = [
 ]
 
 [project.scripts]
-badger_plot = "badger_plot.__main__:main"
+egg_suite = "egg_suite.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/Claudethelobster/GUI_Plotter"
+Homepage = "https://github.com/Claudethelobster/EggSuite"
 
 [tool.setuptools]
-packages = ["badger_plot"]
+packages = ["egg_suite"]
 include-package-data = true
