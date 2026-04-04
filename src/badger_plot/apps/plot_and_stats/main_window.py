@@ -57,10 +57,12 @@ from apps.plot_and_stats.analysis_hist import SmartBinningDialog, CDFOverlayDial
 class BadgerLoopQtGraph(QMainWindow):
     home_requested = pyqtSignal() # Fired when the Home button is clicked
 
-    def __init__(self, workspace=None, is_popout=False):
+    # --- UPDATED CONSTRUCTOR ---
+    def __init__(self, workspace=None, is_popout=False, initial_file=None):
         super().__init__()
         self.workspace = workspace
         self.is_popout = is_popout
+        self.initial_file = initial_file # Save the hand-off from the Hub
         self.series_data = {"2D": [], "3D": [], "Heatmap": [], "Histogram": []}
         
         # --- NEW: PORTABLE MODE CHECK ---
@@ -4753,9 +4755,15 @@ class BadgerLoopQtGraph(QMainWindow):
         self.last_file = self.settings.value("last_file", "")
         self.file_type = self.settings.value("file_type", "BadgerLoop")
         
+        # --- NEW: FORCE OVERRIDE FROM HUB ---
+        if hasattr(self, 'initial_file') and self.initial_file:
+            self.last_file = self.initial_file
+            self.settings.setValue("last_load_opts", "") # Wipe the ghost file's options
+        # ------------------------------------
+        
         if not BADGERLOOP_AVAILABLE and self.file_type == "BadgerLoop":
             self.file_type = "CSV"
-            self.last_file = "" 
+            self.last_file = ""
     
         self.xscale.setCurrentText(self.settings.value("xscale", "Linear"))
         self.yscale.setCurrentText(self.settings.value("yscale", "Linear"))
@@ -4843,8 +4851,17 @@ class BadgerLoopQtGraph(QMainWindow):
                         if cached_ds is not None:
                             self.dataset = cached_ds
                             dataset_loaded_from_ram = True
-
-                # --- 2. DISK FALLBACK: Read from hard drive if not in RAM ---
+                            
+                            # --- NEW: Force file_type to match RAM dataset, ignoring settings.ini ---
+                            dt_name = type(self.dataset).__name__
+                            if dt_name == 'MultiCSVDataset': self.file_type = "MultiCSV"
+                            elif dt_name == 'CSVDataset': self.file_type = "CSV"
+                            elif dt_name == 'HDF5Dataset': self.file_type = "HDF5"
+                            else: self.file_type = "BadgerLoop"
+                            
+                            if getattr(self.dataset, 'is_concatenated', False):
+                                self.file_type = "ConcatenatedCSV"
+                            # ------------------------------------------------------------------------
                 if not dataset_loaded_from_ram:
                     
                     # --- NEW: AUTO-DETECT OVERRIDE ---

@@ -27,7 +27,11 @@ from core.workspace import GlobalWorkspace
 from apps.hub.main_menu import HubWindow
 
 def main():
-    app = QApplication(sys.argv)
+    # --- FIX: Safe QApplication check for Spyder ---
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    # -----------------------------------------------
     
     # --- NEW: Force the Fusion rendering engine ---
     app.setStyle("Fusion")
@@ -56,8 +60,6 @@ def main():
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.primary_text))
     
     # --- FIX: High-contrast checkbox borders ---
-    # In Dark Mode (is_dark=True), we use a light grey (#AAAAAA) so it pops against the dark panel.
-    # In Light Mode (is_dark=False), we use almost solid black (#222222) so it pops against the white panel.
     strong_border = QColor("#AAAAAA") if is_dark else QColor("#222222")
     
     palette.setColor(QPalette.ColorRole.Dark, strong_border)
@@ -68,16 +70,15 @@ def main():
     app.setPalette(palette)
     # -----------------------------------------------
     
-    # 2. Initialize the Global Memory
+    # 2. Initialise the Global Memory
     workspace = GlobalWorkspace()
     
     # 3. Launch the Hub Dashboard
     hub = HubWindow(workspace)
     hub.show()
     
-    # We will hook up the tile clicks in the next step!
-    
-    sys.exit(app.exec())
+    # Use app.exec() without sys.exit() to prevent Spyder from forcefully killing the console
+    app.exec()
 
 if __name__ == '__main__':
     main()

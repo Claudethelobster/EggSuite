@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.theme import theme
+from apps.data_inspector.inspector_window import DataInspectorWindow
 from ui.custom_widgets import ToggleSwitch
 from core.data_loader import DataLoaderThread
 from ui.dialogs.data_mgmt import FileImportDialog, CopyableErrorDialog, TemplateSelectionDialog, BatchImportDialog
@@ -238,7 +239,7 @@ class HubWindow(QMainWindow):
 
         # Inspector Tile
         self.tile_inspect = AppTile("Data Inspector", "View raw arrays, sanitize anomalies, and edit dataset tables.", icon="🧮")
-        self.tile_inspect.launch_requested.connect(lambda popout: QMessageBox.information(self, "Coming Soon", "The Spreadsheet Data Inspector is currently in development!"))
+        self.tile_inspect.launch_requested.connect(self._launch_inspector_app)
         grid.addWidget(self.tile_inspect, 0, 1)
 
         # Settings Tile
@@ -617,8 +618,19 @@ class HubWindow(QMainWindow):
             QMessageBox.warning(self, "Workspace Empty", "Please load a Data File into the Workspace before launching the Plotter.")
             return
 
+        # --- NEW: Identify the Active File from the Tree ---
+        active_file = None
+        selected = self.file_tree.selectedItems()
+        if selected:
+            active_file = selected[0].data(0, Qt.ItemDataRole.UserRole)
+        elif self.workspace.datasets:
+            # Fallback to the first loaded dataset if nothing is highlighted
+            active_file = list(self.workspace.datasets.keys())[0]
+        # ---------------------------------------------------
+
         from apps.plot_and_stats.main_window import BadgerLoopQtGraph
-        plot_window = BadgerLoopQtGraph(self.workspace, is_popout=popout)
+        # Pass the active file directly into the constructor!
+        plot_window = BadgerLoopQtGraph(self.workspace, is_popout=popout, initial_file=active_file)
         
         if popout:
             plot_window.show()
@@ -628,6 +640,25 @@ class HubWindow(QMainWindow):
             self.hide()
             plot_window.show()
             self.open_apps.append(plot_window)
+            
+    def _launch_inspector_app(self, popout):
+        if not self.workspace.datasets:
+            QMessageBox.warning(self, "Workspace Empty", "Please load a Data File into the Workspace before launching the Inspector.")
+            return
+
+        # Pass the popout flag here!
+        inspector_window = DataInspectorWindow(self.workspace, is_popout=popout)
+        
+        if popout:
+            # Spawn independently, leave Hub visible (No Home Button)
+            inspector_window.show()
+            self.open_apps.append(inspector_window)
+        else:
+            # Wire up the return signal, hide Hub, show Inspector (Has Home Button)
+            inspector_window.home_requested.connect(self.show)
+            self.hide()
+            inspector_window.show()
+            self.open_apps.append(inspector_window)
 
     def _launch_settings_app(self, popout):
         from apps.settings.settings import PreferencesDialog
