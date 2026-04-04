@@ -23,7 +23,7 @@ pip install "git+https://github.com/Claudethelobster/EggSuite"
 
 Which can the be ran in powershell using:
 ```powershell
-badger_plot
+egg_suite
 ```
 or in a python:
 ```python
