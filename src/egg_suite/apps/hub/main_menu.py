@@ -1,11 +1,11 @@
 import os
 import random
 import csv
-from PyQt6.QtCore import Qt, pyqtSignal, QSettings
+from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QUrl, QPoint
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QFrame, QFileDialog, QMessageBox, QProgressDialog,
-    QDialog
+    QDialog, QGraphicsBlurEffect
 )
 
 from ui.theme import theme
@@ -61,6 +61,38 @@ class AppTile(QFrame):
                 self.launch_requested.emit(self.popout_cb.isChecked())
         super().mousePressEvent(event)
 
+class WindowDimmer(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Greys out the entire application
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 140);")
+        self.hide()
+
+class DropOverlay(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Adds a slight blue tint, thick dashed border, and matches the tree's rounded corners
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: rgba(66, 135, 245, 30); 
+                border: 4px dashed {theme.primary_bg}; 
+                border-radius: 6px; 
+            }}
+        """)
+        
+        layout = QVBoxLayout(self)
+        
+        label = QLabel("➕\nDrop files to load")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet(f"color: {theme.primary_text}; font-size: 26px; font-weight: bold; border: none; background: transparent;")
+        
+        layout.addStretch()
+        layout.addWidget(label)
+        layout.addStretch()
+        
+        self.hide()
 
 class HubWindow(QMainWindow):
     def __init__(self, workspace):
@@ -253,6 +285,13 @@ class HubWindow(QMainWindow):
 
         self.workspace.dataset_added.connect(self._refresh_file_tree)
         self.workspace.dataset_removed.connect(self._refresh_file_tree)
+        
+        # --- NEW: Drag and Drop Spotlight Setup ---
+        self.setAcceptDrops(True)
+        # Make them children of the central widget so they hover above the UI
+        self.window_dimmer = WindowDimmer(self.centralWidget())
+        self.drop_overlay = DropOverlay(self.centralWidget())
+        # ----------------------------------------
 
     # ==========================================
     # FILE LOADING ENGINE
@@ -426,6 +465,179 @@ class HubWindow(QMainWindow):
         self.loader_thread.finished.connect(lambda ds: self._on_load_finished(folder_path, ds))
         self.loader_thread.error.connect(self._on_load_error)
         self.loader_thread.start()
+        
+    def _update_overlay_positions(self):
+        """Ensures the spotlight overlays perfectly track the UI layout."""
+        if hasattr(self, 'window_dimmer') and self.centralWidget():
+            self.window_dimmer.resize(self.centralWidget().size())
+            
+        if hasattr(self, 'drop_overlay') and hasattr(self, 'file_tree'):
+            # Calculate exactly where the file_tree is currently sitting on the screen
+            top_left = self.file_tree.mapTo(self.centralWidget(), QPoint(0, 0))
+            self.drop_overlay.setGeometry(top_left.x(), top_left.y(), self.file_tree.width(), self.file_tree.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_overlay_positions()
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            
+            # Snap overlays to current layout positions
+            self._update_overlay_positions()
+            
+            # 1. Grey out the entire window
+            self.window_dimmer.raise_()
+            self.window_dimmer.show()
+            
+            # 2. Blur ONLY the file tree underneath the dimmer
+            blur = QGraphicsBlurEffect()
+            blur.setBlurRadius(12)
+            self.file_tree.setGraphicsEffect(blur)
+            
+            # 3. Illuminate the drop zone
+            self.drop_overlay.raise_()
+            self.drop_overlay.show()
+
+    def dragLeaveEvent(self, event):
+        # Cleanly remove the blur and hide the spotlights if they drag away
+        self.file_tree.setGraphicsEffect(None)
+        self.window_dimmer.hide()
+        self.drop_overlay.hide()
+
+    def dropEvent(self, event):
+        # Snap the UI back to normal
+        self.file_tree.setGraphicsEffect(None)
+        self.window_dimmer.hide()
+        self.drop_overlay.hide()
+        
+        urls = event.mimeData().urls()
+        paths = [url.toLocalFile() for url in urls if url.isLocalFile()]
+        
+        if paths:
+            # Send the paths to the master Sorting Hat router!
+            self._process_dropped_items(paths)
+            
+    def _process_dropped_items(self, paths):
+        loose_files = []
+        folders = []
+        valid_exts = ('.csv', '.txt', '.h5', '.hdf5')
+
+        # 1. Sort the drop contents securely
+        for p in paths:
+            if os.path.isfile(p) and p.lower().endswith(valid_exts):
+                loose_files.append(p)
+            elif os.path.isdir(p):
+                folders.append(p)
+
+        if not loose_files and not folders:
+            QMessageBox.warning(self, "Invalid Files", "No supported files (CSV, TXT, HDF5) or folders were detected in the drop.")
+            return
+
+        if not hasattr(self, 'load_queue') or self.load_queue is None:
+            self.load_queue = []
+
+        # ==========================================
+        # PHASE 1: UI GATHERING (The Sequential Approach)
+        # ==========================================
+        
+        # A. Handle Loose Files
+        if loose_files:
+            if len(loose_files) == 1:
+                # Re-use your Route 1 logic for a single file
+                fname = loose_files[0]
+                is_badgerloop_actual, is_hdf5_actual = False, False
+                detected_type = "CSV" 
+                try:
+                    with open(fname, 'rb') as f:
+                        header_bytes = f.read(2000)
+                        if header_bytes.startswith(b'\x89HDF\r\n\x1a\n'):
+                            is_hdf5_actual, detected_type = True, "HDF5"
+                        else:
+                            text_chunk = header_bytes.decode('utf-8', errors='ignore')
+                            if "###OUTPUTS" in text_chunk or "###INPUTS" in text_chunk or "###DATA" in text_chunk:
+                                is_badgerloop_actual, detected_type = True, "BadgerLoop"
+                except Exception: pass
+
+                dlg = FileImportDialog(self, detected_type=detected_type)
+                if dlg.exec() == QDialog.DialogCode.Accepted:
+                    opts = dlg.get_options()
+                    if opts["type"] == "HDF5" and not is_hdf5_actual:
+                        QMessageBox.critical(self, "Format Mismatch", "File is not a valid HDF5 binary.")
+                    elif opts["type"] == "CSV" and is_badgerloop_actual:
+                        QMessageBox.critical(self, "Format Mismatch", "This appears to be a native BadgerLoop file.")
+                    else:
+                        opts["filepath"] = fname
+                        self.load_queue.append(opts)
+            else:
+                # Re-use your Route 2 logic for batches
+                dlg = BatchImportDialog(loose_files, self)
+                if dlg.exec() == QDialog.DialogCode.Accepted:
+                    self.load_queue.extend(dlg.get_options_list())
+
+        # B. Handle Folders
+        if folders:
+            # We process them sequentially. If they dropped 3 folders, they get 3 dialogs.
+            for folder_path in folders:
+                all_files = [f for f in os.listdir(folder_path) if f.lower().endswith(valid_exts)]
+                if not all_files: continue
+                all_files.sort()
+
+                dlg = FileImportDialog(self)
+                dlg.file_type.setCurrentText("CSV")
+                dlg.file_type.setEnabled(False) 
+                
+                if dlg.exec() == QDialog.DialogCode.Accepted:
+                    opts = dlg.get_options()
+                    delim = opts["delimiter"]
+                    if delim == "auto": delim = "," 
+                    
+                    signatures = {}
+                    
+                    # Quick signature scan
+                    for fname in all_files:
+                        full_path = os.path.join(folder_path, fname)
+                        try:
+                            with open(full_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
+                                first_line = ""
+                                for line in f:
+                                    if line.strip() and not line.strip().startswith('#'):
+                                        first_line = line.strip()
+                                        break
+                                if not first_line: continue
+                                row = next(csv.reader([first_line], delimiter=delim))
+                                sig = tuple(row) if opts["has_header"] else len(row)
+                                if sig not in signatures: signatures[sig] = []
+                                signatures[sig].append(full_path)
+                        except Exception: pass
+
+                    if not signatures: continue
+
+                    target_sig = list(signatures.keys())[0]
+                    if len(signatures) > 1:
+                        sel_dlg = TemplateSelectionDialog(signatures, self)
+                        if sel_dlg.exec() == QDialog.DialogCode.Accepted:
+                            target_sig = sel_dlg.get_selected_signature()
+                        else:
+                            continue # User skipped this folder
+                            
+                    opts["type"] = "MultiCSV"
+                    opts["file_list"] = signatures[target_sig]
+                    opts["filepath"] = folder_path # We hijack filepath to store the folder name for the loader
+                    self.load_queue.append(opts)
+
+        # ==========================================
+        # PHASE 2: EXECUTION
+        # ==========================================
+        if self.load_queue:
+            if not hasattr(self, 'progress_dialog') or self.progress_dialog is None:
+                self.progress_dialog = QProgressDialog("Initializing Load...", "Cancel", 0, 100, self)
+                self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                self.progress_dialog.setCancelButton(None)
+                self.progress_dialog.show()
+
+            self._process_next_file_in_queue()
 
     def _update_progress_ui(self, percent, text):
         if hasattr(self, 'progress_dialog') and self.progress_dialog:
