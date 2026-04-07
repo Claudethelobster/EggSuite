@@ -1,7 +1,8 @@
 import sys
 import os
 import warnings
-
+import ctypes
+from PyQt6.QtGui import QIcon
 # --- THE SPYDER CACHE ASSASSIN ---
 os.environ.pop("QT_API", None)
 os.environ.pop("QT_PLUGIN_PATH", None)
@@ -27,13 +28,25 @@ from core.workspace import GlobalWorkspace
 from apps.hub.main_menu import HubWindow
 
 def main():
-    # --- FIX: Safe QApplication check for Spyder ---
+    # --- FIX: Tell Windows this is a unique application, not just a Python script ---
+    # This forces the taskbar to use our custom icon instead of the default Python one
+    try:
+        app_id = 'badgerloop.eggsuite.suite.1_0' 
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except AttributeError:
+        pass # Fails silently if the user is on macOS or Linux
+    # --------------------------------------------------------------------------------
+
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
-    # -----------------------------------------------
+        
+    # --- NEW: Set the Global Application Icon ---
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icons", "app_icon.png")
+    app.setWindowIcon(QIcon(icon_path))
+    # ------------------------------------------
     
-    # --- NEW: Force the Fusion rendering engine ---
+    # --- Force the Fusion rendering engine ---
     app.setStyle("Fusion")
     # ----------------------------------------------
     
