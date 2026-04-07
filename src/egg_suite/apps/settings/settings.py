@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QSlider, QFileDialog, QMessageBox, QComboBox, QApplication
 )
 from ui.theme import theme
-from ui.custom_widgets import ToggleSwitch # Import the new switch!
+from ui.custom_widgets import ToggleSwitch
 
 class PreferencesDialog(QDialog):
     def __init__(self, main_window):
@@ -22,7 +22,6 @@ class PreferencesDialog(QDialog):
         dis_text = "#777777" if is_dark else "#999999"
         dis_bg = "#2a2a2a" if is_dark else "#f0f0f0"
         
-        # Removed all QCheckBox entries from the stylesheet
         self.setStyleSheet(f"""
             QDialog {{ background-color: {theme.bg}; color: {theme.fg}; }}
             QLabel {{ color: {theme.fg}; font-size: 13px; }}
@@ -98,20 +97,24 @@ class PreferencesDialog(QDialog):
         self.tabs.addTab(tab, "General & Data")
         
     def _on_save_clicked(self):
-        current_dyn = self.dynamic_res_cb.isChecked()
+        # We only really need to force a restart if they change monitors on a fixed resolution
+        current_mode = self.display_mode_combo.currentText()
         current_mon = self.monitor_combo.currentData()
         
-        if not current_dyn and str(current_mon) != str(self.initial_monitor):
+        if current_mode == "Windowed" and str(current_mon) != str(self.initial_monitor):
             ans = QMessageBox.question(
                 self, "Restart Required", 
-                "Changing the target monitor in Fixed Mode requires the suite to restart to apply the correct Windows scaling.\n\nWould you like to save and restart now?", 
+                "Changing the target monitor in Windowed Mode requires the suite to restart to apply the correct Windows scaling.\n\nWould you like to save and restart now?", 
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if ans == QMessageBox.StandardButton.Yes:
                 self.requires_restart = True
                 self.accept()
             else:
-                self.dynamic_res_cb.setChecked(self.initial_dynamic)
+                # Revert selection
+                idx_mode = self.display_mode_combo.findText(self.initial_mode)
+                if idx_mode >= 0: self.display_mode_combo.setCurrentIndex(idx_mode)
+                
                 idx_mon = self.monitor_combo.findData(self.initial_monitor)
                 if idx_mon >= 0: self.monitor_combo.setCurrentIndex(idx_mon)
                 return 
@@ -120,15 +123,16 @@ class PreferencesDialog(QDialog):
             self.accept()
             
     def _toggle_res_ui(self):
-        is_dynamic = self.dynamic_res_cb.isChecked()
-        self.monitor_combo.setEnabled(not is_dynamic)
-        self.resolution_combo.setEnabled(not is_dynamic)
+        # If Borderless or Fullscreen, disable the resolution dropdown (it fills the screen natively)
+        # But keep the Monitor dropdown active so they can pick which screen to fill!
+        mode = self.display_mode_combo.currentText()
+        is_windowed = (mode == "Windowed")
+        
+        self.resolution_combo.setEnabled(is_windowed)
         
         if hasattr(self, 'display_form'):
-            lbl_mon = self.display_form.labelForField(self.monitor_combo)
             lbl_res = self.display_form.labelForField(self.resolution_combo)
-            if lbl_mon: lbl_mon.setEnabled(not is_dynamic)
-            if lbl_res: lbl_res.setEnabled(not is_dynamic)
+            if lbl_res: lbl_res.setEnabled(is_windowed)
 
     def _build_ui_tab(self):
         tab = QWidget()
@@ -139,9 +143,12 @@ class PreferencesDialog(QDialog):
         
         self.display_form.addRow(QLabel("<hr style='border: 1px solid #ccc;'>"))
         
-        self.dynamic_res_cb = ToggleSwitch("Enable dynamic resolution & free dragging")
-        self.dynamic_res_cb.stateChanged.connect(self._toggle_res_ui)
-        self.display_form.addRow("Window Mode:", self.dynamic_res_cb)
+        # --- NEW: Display Mode Dropdown ---
+        self.display_mode_combo = QComboBox()
+        self.display_mode_combo.addItems(["Windowed", "Borderless Windowed", "Fullscreen"])
+        self.display_mode_combo.currentIndexChanged.connect(self._toggle_res_ui)
+        self.display_form.addRow("Display Mode:", self.display_mode_combo)
+        # ----------------------------------
         
         self.monitor_combo = QComboBox()
         self.screens = QApplication.screens()
@@ -227,7 +234,6 @@ class PreferencesDialog(QDialog):
         
         self.tabs.addTab(tab, "Advanced / Performance")
 
-    # ... [The remaining methods (load_current_settings, factory_reset, etc.) stay exactly as they were] ...
     def load_current_settings(self):
         self.mirror_subfolder.setChecked(self.settings.value("mirror_subfolder", False, bool))
         self.portable_mode.setChecked(self.settings.value("portable_mode", False, bool))
@@ -257,9 +263,18 @@ class PreferencesDialog(QDialog):
         else:
             self.initial_resolution = "MAX"
             
-        self.initial_dynamic = self.settings.value("dynamic_resolution", False, bool)
-        self.dynamic_res_cb.setChecked(self.initial_dynamic)
+        # --- NEW: Load Display Mode ---
+        self.initial_mode = self.settings.value("display_mode", "Windowed", str)
+        # Fallback check for old settings files
+        if self.initial_mode not in ["Windowed", "Borderless Windowed", "Fullscreen"]:
+            self.initial_mode = "Windowed"
+            
+        idx_mode = self.display_mode_combo.findText(self.initial_mode)
+        if idx_mode >= 0:
+            self.display_mode_combo.setCurrentIndex(idx_mode)
+            
         self._toggle_res_ui() 
+        # ------------------------------
         
         self.requires_restart = False
 
@@ -313,5 +328,5 @@ class PreferencesDialog(QDialog):
             "crosshair_poll_rate": self.poll_slider.value(),
             "target_monitor": self.monitor_combo.currentData(),
             "target_resolution": self.resolution_combo.currentData(),
-            "dynamic_resolution": self.dynamic_res_cb.isChecked()
+            "display_mode": self.display_mode_combo.currentText() # <-- Save the new string setting
         }

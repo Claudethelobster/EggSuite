@@ -1571,6 +1571,28 @@ class BadgerLoopQtGraph(QMainWindow):
         help_action = QAction("How to use", self)
         help_action.triggered.connect(self.show_help)
         help_menu.addAction(help_action)
+        
+        # --- CORNER QUIT BUTTON (Fullscreen / Borderless Only) ---
+        current_mode = getattr(self, 'display_mode', self.settings.value("display_mode", "Windowed"))
+        if not getattr(self, 'is_popout', False) and current_mode in ["Borderless Windowed", "Fullscreen"]:
+            quit_container = QWidget()
+            quit_lay = QHBoxLayout(quit_container)
+            quit_lay.setContentsMargins(0, 0, 10, 0)
+            
+            btn_exit = QPushButton("✖")
+            btn_exit.setFixedSize(35, 25)
+            btn_exit.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_exit.setToolTip("Exit Plotter")
+            btn_exit.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {theme.fg}; border: none; font-size: 14px; font-weight: bold; }}
+                QPushButton:hover {{ background-color: {theme.danger_bg}; color: {theme.danger_text}; border-radius: 4px; }}
+            """)
+            btn_exit.clicked.connect(self.close)
+            quit_lay.addWidget(btn_exit)
+            
+            # This pins the widget to the far right of the Menu Bar
+            menubar.setCornerWidget(quit_container, Qt.Corner.TopRightCorner)
+        # --------------------------------------------------------
 
     def _update_selection_stats(self):
         if not getattr(self, 'selected_indices', set()):
@@ -4442,68 +4464,54 @@ class BadgerLoopQtGraph(QMainWindow):
         self._resize_plot_widget()
         
     def _apply_window_sizing(self):
-        """ Applies either dynamic free-dragging or locked scaling-aware resolution. """
-        is_dynamic = self.settings.value("dynamic_resolution", False, bool)
+        """ Applies Windowed, Borderless, or Fullscreen modes based on Global Settings. """
+        self.display_mode = self.settings.value("display_mode", "Windowed")
         
-        if is_dynamic:
-            # Unlock the window entirely so the user can drag and resize it natively
-            self.setMinimumSize(0, 0)
-            self.setMaximumSize(16777215, 16777215)
-            return # Exit early, skipping all teleportation and locking logic!
+        # 1. Flag intercept for Borderless mode
+        if self.display_mode == "Borderless Windowed" and not self.is_popout:
+            self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
 
+        # 2. Monitor Teleportation Engine
         from PyQt6.QtWidgets import QApplication
         screens = QApplication.screens()
-        
         try:
             target_monitor = int(self.settings.value("target_monitor", 0))
-        except ValueError:
-            target_monitor = 0
-            
+        except ValueError: target_monitor = 0
+        
         if target_monitor < 0 or target_monitor >= len(screens):
             target_monitor = 0
-            
         target_screen = screens[target_monitor]
         
-        # 1. TELEPORT FIRST to force Windows to update the window's internal DPI
+        # Move near target to prime DPI scaling
         geom = target_screen.geometry()
         self.move(geom.x() + 50, geom.y() + 50)
-        
         if self.windowHandle():
             self.windowHandle().setScreen(target_screen)
-            
-        # Let the OS catch up and assign the correct 100% or 125% scale factor!
         QApplication.processEvents() 
-        
-        # 2. NOW calculate the geometry based on the correct DPI
-        avail_geom = target_screen.availableGeometry() 
-        scale_factor = target_screen.devicePixelRatio() 
-        
-        target_res = self.settings.value("target_resolution", "MAX")
-        
-        if target_res == "MAX":
-            self.setMinimumSize(0, 0)
-            self.setMaximumSize(16777215, 16777215)
-            self.showMaximized()
+
+        # 3. Apply the final Display Mode
+        if self.is_popout:
+            self.showNormal()
         else:
-            try:
-                self.showNormal() 
-                w_phys, h_phys = map(int, target_res.split('x'))
-                
-                # Convert physical pixels back to logical pixels for Qt
-                w_log = int(w_phys / scale_factor)
-                h_log = int(h_phys / scale_factor)
-                
-                self.setFixedSize(w_log, h_log)
-                
-                x_centre = avail_geom.x() + (avail_geom.width() - w_log) // 2
-                y_centre = avail_geom.y() + (avail_geom.height() - h_log) // 2
-                self.move(x_centre, y_centre)
-                
-            except Exception as e:
-                print(f"Failed to apply custom resolution: {e}")
+            if self.display_mode == "Fullscreen":
+                self.showFullScreen()
+            elif self.display_mode == "Borderless Windowed":
                 self.showMaximized()
-                
-        # 3. Force PyQtGraph to rebuild its canvas at the new DPI to prevent graphics tearing
+            else:
+                # Standard Windowed logic
+                target_res = self.settings.value("target_resolution", "MAX")
+                if target_res == "MAX":
+                    self.showMaximized()
+                else:
+                    try:
+                        w_phys, h_phys = map(int, target_res.split('x'))
+                        scale = target_screen.devicePixelRatio()
+                        self.setFixedSize(int(w_phys / scale), int(h_phys / scale))
+                        self.showNormal()
+                    except Exception:
+                        self.showMaximized()
+        
+        # 4. Force PyQtGraph to rebuild its canvas at the new DPI to prevent graphics tearing
         if self.dataset:
             self._is_plotting = False
             self.plot()

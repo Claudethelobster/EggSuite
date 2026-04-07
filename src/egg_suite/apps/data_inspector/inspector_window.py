@@ -2,11 +2,11 @@
 import os
 import pandas as pd
 import numpy as np
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelectionModel, pyqtSignal
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelectionModel, pyqtSignal, QSettings
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
     QLabel, QTableView, QMenu, QTreeWidget, QTreeWidgetItem, QHeaderView,
-    QSplitter, QTextEdit, QDialog 
+    QSplitter, QTextEdit, QDialog
 )
 from PyQt6.QtGui import QAction
 from ui.theme import theme
@@ -71,6 +71,14 @@ class DataInspectorWindow(QMainWindow):
         self.resize(1200, 800)
         
         # --- UI SKELETON ---
+        # 1. Fetch Display Mode from settings
+        self.settings = QSettings("BadgerLoop", "QtPlotter") # Ensure settings access
+        self.display_mode = self.settings.value("display_mode", "Windowed")
+        
+        # 2. Apply Window Flags for Borderless Mode
+        if self.display_mode == "Borderless Windowed" and not self.is_popout:
+            self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
@@ -84,6 +92,14 @@ class DataInspectorWindow(QMainWindow):
             self.workspace.dataset_added.connect(self._on_workspace_updated)
             self.workspace.dataset_removed.connect(self._on_workspace_updated)
             self._on_workspace_updated()
+        
+        if not self.is_popout:
+            if self.display_mode == "Fullscreen":
+                self.showFullScreen()
+            elif self.display_mode == "Borderless Windowed":
+                self.showMaximized()
+            else:
+                self.showNormal()
 
     def _build_menubar(self):
         # QMainWindow has a built-in menu bar!
@@ -143,6 +159,26 @@ class DataInspectorWindow(QMainWindow):
         
         # Stretch the layout to push everything to the left
         toolbar_layout.addStretch()
+
+        # --- NEW: Smart Quit Button ---
+        if not self.is_popout and self.display_mode in ["Borderless Windowed", "Fullscreen"]:
+            self.btn_quit = QPushButton("✖")
+            self.btn_quit.setFixedSize(30, 30)
+            self.btn_quit.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.btn_quit.setToolTip("Exit Data Inspector")
+            self.btn_quit.setStyleSheet(f"""
+                QPushButton {{ 
+                    background-color: transparent; color: {theme.fg}; 
+                    font-weight: bold; font-size: 16px; border: none; 
+                }}
+                QPushButton:hover {{ 
+                    background-color: {theme.danger_bg}; color: {theme.danger_text}; 
+                    border-radius: 4px; 
+                }}
+            """)
+            self.btn_quit.clicked.connect(self.close)
+            toolbar_layout.addWidget(self.btn_quit)
+        # ------------------------------
         
         self.main_layout.addLayout(toolbar_layout)
         
