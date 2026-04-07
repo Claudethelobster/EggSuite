@@ -1,7 +1,7 @@
 import os
 import random
 import csv
-from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QUrl, QPoint
+from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QUrl, QPoint, QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QFrame, QFileDialog, QMessageBox, QProgressDialog,
@@ -13,6 +13,94 @@ from apps.data_inspector.inspector_window import DataInspectorWindow
 from ui.custom_widgets import ToggleSwitch
 from core.data_loader import DataLoaderThread
 from ui.dialogs.data_mgmt import FileImportDialog, CopyableErrorDialog, TemplateSelectionDialog, BatchImportDialog
+
+class RecentFilesDialog(QDialog):
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.selected_path = None
+        
+        self.setWindowTitle("Recent Files")
+        self.setMinimumWidth(400)
+        self.setStyleSheet(f"background-color: {theme.bg}; color: {theme.fg};")
+        
+        self.main_layout = QVBoxLayout(self)
+        self._build_ui()
+        
+    def _build_ui(self):
+        # Clear layout if rebuilding (used when the cache is cleared)
+        while self.main_layout.count():
+            item = self.main_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            elif item.layout():
+                while item.layout().count():
+                    sub = item.layout().takeAt(0)
+                    if sub.widget(): sub.widget().deleteLater()
+            
+        import json
+        import os
+        recents_str = self.settings.value("recent_files", "[]")
+        try: recents = json.loads(recents_str)
+        except Exception: recents = []
+        
+        if not recents:
+            lbl = QLabel("<i>No recent files found in the cache.</i>")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet(f"color: {theme.fg}; font-size: 14px; padding: 20px;")
+            self.main_layout.addWidget(lbl)
+        else:
+            lbl = QLabel("<b>Select a recent file or folder to load:</b>")
+            lbl.setStyleSheet("font-size: 14px;")
+            self.main_layout.addWidget(lbl)
+            self.main_layout.addSpacing(10)
+            
+            for path in recents:
+                if not os.path.exists(path): continue
+                
+                icon = "📁" if os.path.isdir(path) else "📄"
+                btn = QPushButton(f"{icon} {os.path.basename(path)}")
+                btn.setToolTip(path) # Hovering shows the full file path!
+                btn.setStyleSheet(f"""
+                    QPushButton {{ 
+                        text-align: left; padding: 10px; background-color: {theme.panel_bg}; 
+                        border: 1px solid {theme.border}; border-radius: 4px; 
+                        color: {theme.primary_text}; font-weight: bold; font-size: 13px;
+                    }}
+                    QPushButton:hover {{ 
+                        background-color: {theme.primary_bg}; border: 1px solid {theme.primary_border}; 
+                    }}
+                """)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(lambda checked, p=path: self._select_file(p))
+                self.main_layout.addWidget(btn)
+                
+        self.main_layout.addSpacing(15)
+        
+        # Bottom controls
+        bottom_lay = QHBoxLayout()
+        
+        clear_btn = QPushButton("🗑️ Clear Cache")
+        clear_btn.setStyleSheet(f"padding: 6px 12px; color: {theme.danger_text}; border: 1px solid {theme.danger_border}; border-radius: 4px; background-color: {theme.bg};")
+        clear_btn.clicked.connect(self._clear_cache)
+        
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet(f"padding: 6px 15px; border: 1px solid {theme.border}; border-radius: 4px; background-color: {theme.bg}; color: {theme.fg};")
+        close_btn.clicked.connect(self.reject)
+        
+        bottom_lay.addWidget(clear_btn)
+        bottom_lay.addStretch()
+        bottom_lay.addWidget(close_btn)
+        
+        self.main_layout.addLayout(bottom_lay)
+        
+    def _select_file(self, path):
+        self.selected_path = path
+        self.accept()
+        
+    def _clear_cache(self):
+        import json
+        self.settings.setValue("recent_files", json.dumps([]))
+        self._build_ui() # Instantly refreshes the window to show it is empty
 
 class AppTile(QFrame):
     launch_requested = pyqtSignal(bool) 
@@ -181,8 +269,15 @@ class HubWindow(QMainWindow):
         btn_h1.addWidget(self.btn_load_folder)
         left_panel.addLayout(btn_h1)
 
+        # --- NEW: RECENT FILES BUTTON ---
+        self.btn_recent_files = QPushButton("🕒 Recent Files")
+        self.btn_recent_files.setStyleSheet(secondary_btn_style)
+        self.btn_recent_files.clicked.connect(self._open_recent_files_dialog)
+        left_panel.addWidget(self.btn_recent_files)
+
         btn_h2 = QHBoxLayout()
         self.btn_remove = QPushButton("✖ Remove Selected")
+        # ... [rest of existing code] ...
         self.btn_remove.setStyleSheet(secondary_btn_style)
         self.btn_remove.clicked.connect(self._remove_selected_file)
         
@@ -302,11 +397,56 @@ class HubWindow(QMainWindow):
             self.restoreState(state)
         # ------------------------------
         
+        # --- NEW: Initialise Telemetry ---
+        self._setup_status_bar()
+        
     def closeEvent(self, event):
         """Saves the window size and position when the app is closed."""
         self.settings.setValue("hub_geometry", self.saveGeometry())
         self.settings.setValue("hub_state", self.saveState())
         super().closeEvent(event)
+        
+    def _setup_status_bar(self):
+        self.statusBar().setStyleSheet(f"background-color: {theme.panel_bg}; color: {theme.fg}; border-top: 1px solid {theme.border};")
+        
+        self.ram_label = QLabel("RAM: -- MB")
+        self.ram_label.setStyleSheet(f"color: {theme.primary_text}; font-weight: bold; font-family: Consolas, monospace; padding-right: 15px;")
+        
+        self.statusBar().addPermanentWidget(self.ram_label)
+        self.statusBar().showMessage("Ready", 5000)
+        
+        self.ram_timer = QTimer(self)
+        self.ram_timer.timeout.connect(self._update_ram_usage)
+        self.ram_timer.start(2000) 
+        self._update_ram_usage()
+
+    def _update_ram_usage(self):
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            mem_mb = process.memory_info().rss / (1024 * 1024)
+            self.ram_label.setText(f"RAM: {mem_mb:.1f} MB")
+        except ImportError:
+            self.ram_label.setText("RAM: [psutil missing]")
+
+    def _add_to_recents(self, filepath):
+        import json
+        recents_str = self.settings.value("recent_files", "[]")
+        try: recents = json.loads(recents_str)
+        except Exception: recents = []
+        
+        if filepath in recents: recents.remove(filepath)
+        recents.insert(0, filepath)
+        recents = recents[:5] 
+        
+        self.settings.setValue("recent_files", json.dumps(recents))
+        # Note: We no longer trigger a UI refresh here since the UI is now a popup!
+
+    def _open_recent_files_dialog(self):
+        dlg = RecentFilesDialog(self.settings, self)
+        # If the user clicks a file, we hijack the Drag and Drop router to load it perfectly!
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_path:
+            self._process_dropped_items([dlg.selected_path])
 
     # ==========================================
     # FILE LOADING ENGINE
@@ -678,6 +818,11 @@ class HubWindow(QMainWindow):
             self.workspace.add_folder(fname, dataset)
         else:
             self.workspace.add_single_file(fname, dataset)
+            
+        # --- NEW: Save to Recent Files and notify user ---
+        self._add_to_recents(fname)
+        self.statusBar().showMessage(f"Successfully loaded: {os.path.basename(fname)}", 5000)
+        # ------------------------------------------------
             
         # Automatically trigger the next file in the queue
         self._process_next_file_in_queue()

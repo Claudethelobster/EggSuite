@@ -2,7 +2,9 @@ import sys
 import os
 import warnings
 import ctypes
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QPalette, QColor, QPixmap
+from PyQt6.QtWidgets import QApplication, QSplashScreen
+from PyQt6.QtCore import QSettings, Qt
 # --- THE SPYDER CACHE ASSASSIN ---
 os.environ.pop("QT_API", None)
 os.environ.pop("QT_PLUGIN_PATH", None)
@@ -18,9 +20,7 @@ warnings.simplefilter("ignore")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ----------------------------------
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QSettings
-from PyQt6.QtGui import QPalette, QColor
+
 
 # Import Theme and new Core architecture
 from ui.theme import theme
@@ -83,12 +83,25 @@ def main():
     app.setPalette(palette)
     # -----------------------------------------------
     
+    # --- 1. SHOW SPLASH SCREEN ---
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icons", "app_icon.png")
+    
+    splash_pix = QPixmap(icon_path).scaled(250, 250, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
+    splash.show()
+    app.processEvents() # Force Windows to draw the splash image immediately
+    # -----------------------------
+    
     # 2. Initialise the Global Memory
     workspace = GlobalWorkspace()
     
     # 3. Launch the Hub Dashboard
     hub = HubWindow(workspace)
     hub.show()
+    
+    # --- 2. CLOSE SPLASH SCREEN ---
+    splash.finish(hub)
+    # ------------------------------
     
     # Use app.exec() without sys.exit() to prevent Spyder from forcefully killing the console
     app.exec()
