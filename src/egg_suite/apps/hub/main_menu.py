@@ -288,17 +288,39 @@ class HubWindow(QMainWindow):
         
         # --- NEW: Drag and Drop Spotlight Setup ---
         self.setAcceptDrops(True)
-        # Make them children of the central widget so they hover above the UI
         self.window_dimmer = WindowDimmer(self.centralWidget())
         self.drop_overlay = DropOverlay(self.centralWidget())
         # ----------------------------------------
+
+        # --- RESTORE SESSION MEMORY ---
+        geom = self.settings.value("hub_geometry")
+        if geom:
+            self.restoreGeometry(geom)
+            
+        state = self.settings.value("hub_state")
+        if state:
+            self.restoreState(state)
+        # ------------------------------
+        
+    def closeEvent(self, event):
+        """Saves the window size and position when the app is closed."""
+        self.settings.setValue("hub_geometry", self.saveGeometry())
+        self.settings.setValue("hub_state", self.saveState())
+        super().closeEvent(event)
 
     # ==========================================
     # FILE LOADING ENGINE
     # ==========================================
     def _load_data_file(self):
-        fnames, _ = QFileDialog.getOpenFileNames(self, "Open Data File(s)", "", "All supported files (*.txt *.csv *.h5 *.hdf5);;CSV files (*.csv);;HDF5 files (*.h5 *.hdf5);;All files (*)")
+        # Read the last used directory (default to empty string if it doesn't exist yet)
+        last_dir = self.settings.value("last_load_directory", "")
+        
+        # Pass last_dir into the dialogue
+        fnames, _ = QFileDialog.getOpenFileNames(self, "Open Data File(s)", last_dir, "All supported files (*.txt *.csv *.h5 *.hdf5);;CSV files (*.csv);;HDF5 files (*.h5 *.hdf5);;All files (*)")
         if not fnames: return
+        
+        # Save the new directory for next time!
+        self.settings.setValue("last_load_directory", os.path.dirname(fnames[0]))
 
         # --- ROUTE 1: Single File Selected (Classic Logic) ---
         if len(fnames) == 1:
@@ -373,9 +395,15 @@ class HubWindow(QMainWindow):
         self.loader_thread.start()
 
     def _load_data_folder(self):
-        # 1. Use getExistingDirectory so the OS lets them pick a folder!
-        folder_path = QFileDialog.getExistingDirectory(self, "Select Folder with CSVs")
+        # Read the last used directory
+        last_dir = self.settings.value("last_load_directory", "")
+        
+        # Pass last_dir into the dialogue
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Folder with CSVs", last_dir)
         if not folder_path: return
+        
+        # Save the new directory for next time!
+        self.settings.setValue("last_load_directory", folder_path)
 
         all_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.csv')]
         if not all_files:
