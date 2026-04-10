@@ -5,7 +5,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QUrl, QPoint, QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QFrame, QFileDialog, QMessageBox, QProgressDialog,
-    QDialog, QGraphicsBlurEffect
+    QDialog, QGraphicsBlurEffect, QLineEdit
 )
 
 from ui.theme import theme
@@ -207,6 +207,14 @@ class HubWindow(QMainWindow):
         ws_title = QLabel("Active Workspace")
         ws_title.setStyleSheet("font-size: 20px; font-weight: bold;")
         left_panel.addWidget(ws_title)
+
+        # --- NEW: Workspace Search Bar ---
+        self.workspace_search = QLineEdit()
+        self.workspace_search.setPlaceholderText("🔍 Search files...")
+        self.workspace_search.setStyleSheet(f"background-color: {theme.bg}; color: {theme.fg}; border: 1px solid {theme.border}; padding: 5px; border-radius: 4px;")
+        self.workspace_search.textChanged.connect(self._filter_workspace_tree)
+        left_panel.addWidget(self.workspace_search)
+        # ---------------------------------
 
         # --- UPGRADED: Tree Widget ---
         self.file_tree = QTreeWidget()
@@ -900,6 +908,23 @@ class HubWindow(QMainWindow):
                 self.file_tree.addTopLevelItem(item)
                 
         self.file_tree.expandAll()
+        
+    def _filter_workspace_tree(self, text):
+        query = text.lower()
+        for i in range(self.file_tree.topLevelItemCount()):
+            parent_item = self.file_tree.topLevelItem(i)
+            parent_visible = query in parent_item.text(0).lower()
+            
+            any_child_visible = False
+            for j in range(parent_item.childCount()):
+                child = parent_item.child(j)
+                if query in child.text(0).lower() or parent_visible:
+                    child.setHidden(False)
+                    any_child_visible = True
+                else:
+                    child.setHidden(True)
+            
+            parent_item.setHidden(not (parent_visible or any_child_visible))
         
     def _merge_selected_folder(self):
         item = self.file_tree.currentItem()

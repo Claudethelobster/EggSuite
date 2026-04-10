@@ -288,6 +288,11 @@ class BadgerLoopQtGraph(QMainWindow):
         
         from PyQt6.QtWidgets import QListWidgetItem
         item = QListWidgetItem(self.series_list)
+        
+        # --- NEW: Embed the pair dictionary securely in the item ---
+        item.setData(Qt.ItemDataRole.UserRole, pair)
+        # -----------------------------------------------------------
+        
         self.series_list.addItem(item)
         
         widget = QWidget()
@@ -341,6 +346,39 @@ class BadgerLoopQtGraph(QMainWindow):
         
         item.setSizeHint(widget.sizeHint())
         self.series_list.setItemWidget(item, widget)
+        
+    def copy_plot_to_clipboard(self):
+        from PyQt6.QtWidgets import QApplication
+        clipboard = QApplication.clipboard()
+        
+        if self.plot_mode == "3D" and self.gl_widget:
+            img = self.gl_widget.readQImage()
+            clipboard.setImage(img)
+        else:
+            # Temporarily hide the interactive gradient bar so it isn't in the copy
+            if self.plot_mode == "Heatmap":
+                self.heatmap_item.vb.hide()
+                QApplication.processEvents()
+            
+            pixmap = self.plot_widget.grab()
+            clipboard.setPixmap(pixmap)
+            
+            if self.plot_mode == "Heatmap":
+                self.heatmap_item.vb.show()
+
+    def _sync_series_order(self, parent, start, end, destination, row):
+        """Rebuilds the internal data array to match the new UI list order."""
+        new_data = []
+        for i in range(self.series_list.count()):
+            item = self.series_list.item(i)
+            pair = item.data(Qt.ItemDataRole.UserRole)
+            new_data.append(pair)
+            
+        self.series_data[self.plot_mode] = new_data
+        
+        # Re-render the canvas immediately so the Z-order physically updates
+        if not getattr(self, '_is_updating_ui', False):
+            self.plot()
 
     def _toggle_series_axis(self, item):
         row = self.series_list.row(item)
@@ -1016,7 +1054,14 @@ class BadgerLoopQtGraph(QMainWindow):
             
             self.loader_thread = DataLoaderThread(self.dataset.filename, opts)
             self.loader_thread.progress.connect(self._update_progress_ui)
-            self.loader_thread.finished.connect(lambda ds: self._on_load_finished(ds, self.dataset.filename, opts))
+            target_file = self.dataset.filename
+            def on_refresh_done(ds):
+                self._on_load_finished(ds, target_file, opts)
+                # Auto-select the first of the two sliced columns
+                self.ycol.setCurrentIndex(len(ds.column_names) - 2)
+                self.update_current_series()
+
+            self.loader_thread.finished.connect(on_refresh_done)
             self.loader_thread.error.connect(self._on_load_error)
             self.loader_thread.start()
             
@@ -1173,7 +1218,14 @@ class BadgerLoopQtGraph(QMainWindow):
             
             self.loader_thread = DataLoaderThread(self.dataset.filename, opts)
             self.loader_thread.progress.connect(self._update_progress_ui)
-            self.loader_thread.finished.connect(lambda ds: self._on_load_finished(ds, self.dataset.filename, opts))
+            target_file = self.dataset.filename
+            def on_refresh_done(ds):
+                self._on_load_finished(ds, target_file, opts)
+                # Auto-select the newly created column!
+                self.ycol.setCurrentIndex(len(ds.column_names) - 1)
+                self.update_current_series()
+
+            self.loader_thread.finished.connect(on_refresh_done)
             self.loader_thread.error.connect(self._on_load_error)
             self.loader_thread.start()
 
@@ -2154,7 +2206,13 @@ class BadgerLoopQtGraph(QMainWindow):
             
             self.loader_thread = DataLoaderThread(self.dataset.filename, opts)
             self.loader_thread.progress.connect(self._update_progress_ui)
-            self.loader_thread.finished.connect(lambda ds: self._on_load_finished(ds, self.dataset.filename, opts))
+            target_file = self.dataset.filename
+            def on_refresh_done(ds):
+                self._on_load_finished(ds, target_file, opts)
+                self.ycol.setCurrentIndex(len(ds.column_names) - 1)
+                self.update_current_series()
+
+            self.loader_thread.finished.connect(on_refresh_done)
             self.loader_thread.error.connect(self._on_load_error)
             self.loader_thread.start()
             
@@ -2992,7 +3050,13 @@ class BadgerLoopQtGraph(QMainWindow):
             
             self.loader_thread = DataLoaderThread(self.dataset.filename, opts)
             self.loader_thread.progress.connect(self._update_progress_ui)
-            self.loader_thread.finished.connect(lambda ds: self._on_load_finished(ds, self.dataset.filename, opts))
+            target_file = self.dataset.filename
+            def on_refresh_done(ds):
+                self._on_load_finished(ds, target_file, opts)
+                self.ycol.setCurrentIndex(len(ds.column_names) - 1)
+                self.update_current_series()
+
+            self.loader_thread.finished.connect(on_refresh_done)
             self.loader_thread.error.connect(self._on_load_error)
             self.loader_thread.start()
             
@@ -3561,6 +3625,12 @@ class BadgerLoopQtGraph(QMainWindow):
         self.series_list.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.series_list.itemSelectionChanged.connect(self.update_active_layer)
         
+        # --- NEW: Enable Drag-and-Drop Z-Order sorting ---
+        from PyQt6.QtWidgets import QAbstractItemView
+        self.series_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.series_list.model().rowsMoved.connect(self._sync_series_order)
+        # -------------------------------------------------
+        
         controls.addWidget(self.series_list)
         
         btn_h = QHBoxLayout()
@@ -3622,6 +3692,12 @@ class BadgerLoopQtGraph(QMainWindow):
         
         options_menu = QMenu(self)
         options_menu.setStyleSheet(f"QMenu {{ background-color: {theme.panel_bg}; color: {theme.fg}; border: 1px solid {theme.border}; }} QMenu::item:selected {{ background-color: {theme.primary_bg}; }}")
+        
+        # --- NEW: Copy to Clipboard ---
+        action_copy = options_menu.addAction("📋 Copy Plot to Clipboard")
+        action_copy.setShortcut("Ctrl+Shift+C")
+        action_copy.triggered.connect(self.copy_plot_to_clipboard)
+        # ------------------------------
         
         action_save = options_menu.addAction("💾 Save Current View (Image)")
         action_save.triggered.connect(self.save_plot) 
@@ -3868,8 +3944,21 @@ class BadgerLoopQtGraph(QMainWindow):
         ds = self.workspace.get_dataset(path)
         if ds:
             opts = getattr(self, 'last_load_opts', {"type": "CSV", "delimiter": ",", "has_header": True})
-            if info["type"] == "folder": opts["type"] = "MultiCSV"
-            elif info["type"] == "child" or info["type"] == "file": opts["type"] = "CSV"
+            
+            # --- FIX: Dynamically detect the true dataset format from RAM! ---
+            dt_name = type(ds).__name__
+            if dt_name == 'MultiCSVDataset' or info["type"] == "folder": 
+                opts["type"] = "MultiCSV"
+            elif dt_name == 'HDF5Dataset': 
+                opts["type"] = "HDF5"
+            elif dt_name == 'CSVDataset': 
+                opts["type"] = "CSV"
+            else: 
+                opts["type"] = "BadgerLoop"
+                
+            if getattr(ds, 'is_concatenated', False):
+                opts["type"] = "ConcatenatedCSV"
+            # -----------------------------------------------------------------
             
             self._on_load_finished(ds, path, opts)
 
@@ -4984,6 +5073,13 @@ class BadgerLoopQtGraph(QMainWindow):
                 self.xcol.blockSignals(False); self.ycol.blockSignals(False); self.zcol.blockSignals(False)
                 
                 self._refresh_series_list_ui()
+                self.custom_axis_labels = {"bottom": None, "left": None, "top": None, "right": None}
+                
+                # --- FIX: Ensure load options are permanently valid for math operations ---
+                if not getattr(self, 'last_load_opts', None) or "type" not in self.last_load_opts:
+                    self.last_load_opts = {"type": self.file_type, "delimiter": ",", "has_header": True}
+                # ------------------------------------------------------------------------
+                
                 self.plot()
             except Exception as e:
                 import traceback
@@ -5057,13 +5153,45 @@ class BadgerLoopQtGraph(QMainWindow):
     def _on_load_finished(self, dataset, fname, opts):
         import copy
         try:
+            # --- FIX 1: Bulletproof the opts dictionary against empty Hub payloads ---
+            if not opts or "type" not in opts:
+                opts = {"type": getattr(self, "file_type", "BadgerLoop"), "delimiter": ",", "has_header": True}
+            # -------------------------------------------------------------------------
+            
             # --- 1. CACHE CURRENT STATE BEFORE SWAPPING ---
+            current_state_to_inherit = None
+            current_mode_to_inherit = None
+            
             if getattr(self, 'dataset', None) is not None and getattr(self, 'workspace', None) is not None:
                 old_path = self.dataset.filename
+                
+                # Backup current state in case the new file is a direct clone (Mirror)
+                current_state_to_inherit = copy.deepcopy(getattr(self, 'series_data', {}))
+                current_mode_to_inherit = getattr(self, 'plot_mode', '2D')
+                
                 if old_path in self.workspace.datasets:
-                    self.workspace.datasets[old_path]["series_data"] = copy.deepcopy(getattr(self, 'series_data', {}))
-                    self.workspace.datasets[old_path]["plot_mode"] = getattr(self, 'plot_mode', '2D')
+                    self.workspace.datasets[old_path]["series_data"] = current_state_to_inherit
+                    self.workspace.datasets[old_path]["plot_mode"] = current_mode_to_inherit
             # ----------------------------------------------
+
+            # --- NEW FIX: REGISTER THE MIRROR & FORCE CACHE UPDATE ---
+            is_new_file = False
+            if hasattr(self, 'workspace') and self.workspace is not None:
+                if fname not in self.workspace.datasets:
+                    is_new_file = True
+                    if getattr(dataset, 'file_list', None) is not None and len(dataset.file_list) > 1:
+                        self.workspace.add_folder(fname, dataset)
+                    else:
+                        self.workspace.add_single_file(fname, dataset)
+                else:
+                    # CRITICAL: Always update the cached dataset object so math changes persist!
+                    self.workspace.datasets[fname]["dataset"] = dataset
+            # ---------------------------------------------------------
+            
+            # --- VISUAL SWAP: Update the Workspace Button text ---
+            if hasattr(self, 'workspace_btn'):
+                self.workspace_btn.setText(f"Active: {os.path.basename(fname)} ▾")
+            # -----------------------------------------------------
             
             # Update the dialog text (it will be destroyed at the end of this function)
             if getattr(self, 'progress_dialog', None) is not None:
@@ -5099,14 +5227,22 @@ class BadgerLoopQtGraph(QMainWindow):
                 "z_name": dataset.column_names.get(min(2, max_idx), "Z")
             }
             
-            # --- 2. RESTORE CACHED STATE OR GENERATE DEFAULTS ---
+            # --- 2. RESTORE CACHED STATE OR INHERIT MIRROR STATE ---
             info = self.workspace.get_item_info(fname) if hasattr(self, 'workspace') else None
 
-            if info and "series_data" in info:
+            if info and "series_data" in info and info["series_data"] and not is_new_file:
                 self.series_data = copy.deepcopy(info["series_data"])
                 if "plot_mode" in info:
                     self.plot_mode = info["plot_mode"]
                     self.set_plot_mode(self.plot_mode)
+            elif is_new_file and current_state_to_inherit and "MIRROR_" in os.path.basename(fname):
+                # We just cloned a file! Seamlessly apply the old UI layout to the new file
+                self.series_data = current_state_to_inherit
+                self.plot_mode = current_mode_to_inherit
+                self.set_plot_mode(self.plot_mode)
+                if info:
+                    info["series_data"] = copy.deepcopy(self.series_data)
+                    info["plot_mode"] = self.plot_mode
             else:
                 self.series_data = {
                     "2D": [dict(default_pair)], 
@@ -5348,14 +5484,13 @@ class BadgerLoopQtGraph(QMainWindow):
             y_name = self.dataset.column_names.get(yidx, "Y")
             z_name = self.dataset.column_names.get(zidx, "Z")
 
-            is_visible = self.series_data[self.plot_mode][row].get('visible', True)
-            current_axis = self.series_data[self.plot_mode][row].get('axis', 'L')
-            
-            self.series_data[self.plot_mode][row] = {
+            # --- FIX 3: Update the dictionary cleanly without destroying trace styles! ---
+            pair = self.series_data[self.plot_mode][row]
+            pair.update({
                 "x": xidx, "y": yidx, "z": zidx,
-                "x_name": x_name, "y_name": y_name, "z_name": z_name,
-                "visible": is_visible, "axis": current_axis
-            }
+                "x_name": x_name, "y_name": y_name, "z_name": z_name
+            })
+            # ---------------------------------------------------------------------------
             
             self.series_list.blockSignals(True)
             item = self.series_list.item(row)
@@ -6227,13 +6362,15 @@ class BadgerLoopQtGraph(QMainWindow):
         
         target_file = self.dataset.filename
         
-        # --- FIX: Safely handle the final dialog close ---
+        # --- FIX: Safely handle the final dialog close & auto-select ---
         def on_refresh_done(ds):
             if getattr(self, 'progress_dialog', None) is not None:
                 try: self.progress_dialog.accept()
                 except: pass
             self._on_load_finished(ds, target_file, opts)
-        # -------------------------------------------------
+            self.ycol.setCurrentIndex(len(ds.column_names) - 1)
+            self.update_current_series()
+        # ---------------------------------------------------------------
         
         from core.data_loader import DataLoaderThread
         self.loader_thread = DataLoaderThread(target_file, opts)
