@@ -1,15 +1,103 @@
 # ui/custom_widgets.py
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, pyqtProperty, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, pyqtProperty, QPropertyAnimation, QEasingCurve, QTimer, QPoint
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QComboBox, 
     QPushButton, QHBoxLayout, QSpinBox, QDoubleSpinBox, QColorDialog,
-    QLabel, QCheckBox, QTableWidget, QHeaderView, QTableWidgetItem, QLineEdit
+    QLabel, QCheckBox, QTableWidget, QHeaderView, QTableWidgetItem, QLineEdit,
+    QWidget, QGraphicsOpacityEffect
 )
 from PyQt6.QtGui import QPainter, QColor, QPainterPath, QFontMetrics
 from ui.theme import theme
 
+
+
+class ToastNotification(QWidget):
+    def __init__(self, parent, title, message, duration=3000, is_error=False):
+        super().__init__(parent)
+        
+        # Don't steal focus or block clicks underneath it
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        
+        from ui.theme import theme
+        bg_color = theme.danger_bg if is_error else theme.success_bg
+        border_color = theme.danger_border if is_error else theme.success_border
+        text_color = theme.danger_text if is_error else theme.success_text
+        icon = "❌" if is_error else "✅"
+
+        self.setStyleSheet(f"""
+            QWidget {{
+                background-color: {bg_color};
+                border: 2px solid {border_color};
+                border-radius: 8px;
+            }}
+            QLabel {{ border: none; background: transparent; }}
+        """)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(15, 12, 15, 12)
+        
+        icon_lbl = QLabel(icon)
+        icon_lbl.setStyleSheet("font-size: 18px;")
+        layout.addWidget(icon_lbl)
+        
+        text_lay = QVBoxLayout()
+        text_lay.setSpacing(2)
+        
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(f"color: {text_color}; font-weight: bold; font-size: 13px;")
+        text_lay.addWidget(title_lbl)
+        
+        if message:
+            msg_lbl = QLabel(message)
+            msg_lbl.setStyleSheet(f"color: {text_color}; font-size: 12px;")
+            msg_lbl.setWordWrap(True)
+            text_lay.addWidget(msg_lbl)
+            
+        layout.addLayout(text_lay)
+        self.adjustSize()
+
+        # Position at the bottom right of the parent window
+        margin = 20
+        self.start_pos = QPoint(
+            parent.width() - self.width() - margin,
+            parent.height()
+        )
+        self.end_pos = QPoint(
+            parent.width() - self.width() - margin,
+            parent.height() - self.height() - margin
+        )
+        self.move(self.start_pos)
+
+        # 1. The Slide-Up Animation
+        self.anim_in = QPropertyAnimation(self, b"pos")
+        self.anim_in.setDuration(300)
+        self.anim_in.setStartValue(self.start_pos)
+        self.anim_in.setEndValue(self.end_pos)
+        self.anim_in.setEasingCurve(QEasingCurve.Type.OutBack)
+
+        # 2. The Fade-Out Animation
+        self.effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self.effect)
+        self.anim_out = QPropertyAnimation(self.effect, b"opacity")
+        self.anim_out.setDuration(400)
+        self.anim_out.setStartValue(1.0)
+        self.anim_out.setEndValue(0.0)
+        self.anim_out.finished.connect(self.deleteLater) # Destroy completely when invisible
+
+        # Setup the timer to trigger the fade out
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.anim_out.start)
+        self.timer.setInterval(duration)
+
+    def show_toast(self):
+        self.raise_()
+        self.show()
+        self.anim_in.start()
+        self.timer.start()
 
 class ToggleSwitch(QCheckBox):
     def __init__(self, text="", parent=None):

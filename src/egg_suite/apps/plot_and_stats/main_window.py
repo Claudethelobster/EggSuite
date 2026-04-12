@@ -49,6 +49,7 @@ from apps.plot_and_stats.fitting import (
     FitFunctionDialog, CustomFitDialog, MultiFitManagerDialog, FitDataToFunctionWindow
 )
 from ui.dialogs.help import HelpDialog
+from ui.custom_widgets import ToastNotification
 
 from apps.settings.settings import PreferencesDialog
 from apps.plot_and_stats.analysis_hist import SmartBinningDialog, CDFOverlayDialog, SigmaClippingDialog
@@ -175,6 +176,16 @@ class BadgerLoopQtGraph(QMainWindow):
             self.workspace.dataset_added.connect(self._on_workspace_updated)
             self.workspace.dataset_removed.connect(self._on_workspace_updated)
             self._on_workspace_updated()
+            
+    def show_toast(self, title, message="", is_error=False):
+        """Spawns a non-blocking notification in the bottom-right corner."""
+        # Clean up any existing toast so they don't overlap
+        if hasattr(self, 'active_toast') and self.active_toast:
+            try: self.active_toast.deleteLater()
+            except: pass
+            
+        self.active_toast = ToastNotification(self, title, message, is_error=is_error)
+        self.active_toast.show_toast()
         
     def show_missing_library_warning(self):
         msg = QMessageBox(self)
@@ -3428,7 +3439,7 @@ class BadgerLoopQtGraph(QMainWindow):
         self.settings.setValue("leg_opacity", self.leg_opacity.value())
         self.settings.setValue("leg_border", self.leg_border.value())
         self.settings.setValue("leg_spacing", self.leg_spacing.value())
-        QMessageBox.information(self, "Saved", "Plot formatting defaults saved successfully.\nThey will automatically load next time you launch EggPlot.")
+        self.show_toast("Settings Saved", "Formatting defaults will load on next launch.")
 
     def _apply_canvas_settings(self):
         # 1. Background
@@ -5875,7 +5886,8 @@ class BadgerLoopQtGraph(QMainWindow):
                             row.append("")
                     writer.writerow(row)
                     
-            QMessageBox.information(self, "Export Complete", "Data successfully exported to CSV!")
+            # NEW:
+            self.show_toast("Export Complete", "Data successfully exported to CSV.")
         except PermissionError:
             QMessageBox.critical(self, "Export Failed", "Permission denied.\nPlease close the CSV file if it is open in Excel and try again.")
 

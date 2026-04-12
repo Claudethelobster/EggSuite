@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.theme import theme
+from ui.custom_widgets import ToastNotification
 from apps.data_inspector.inspector_window import DataInspectorWindow
 from ui.custom_widgets import ToggleSwitch
 from core.data_loader import DataLoaderThread
@@ -407,6 +408,16 @@ class HubWindow(QMainWindow):
         
         # --- NEW: Initialise Telemetry ---
         self._setup_status_bar()
+        
+    def show_toast(self, title, message="", is_error=False):
+        """Spawns a non-blocking notification in the bottom-right corner."""
+        # Clean up any existing toast so they don't overlap
+        if hasattr(self, 'active_toast') and self.active_toast:
+            try: self.active_toast.deleteLater()
+            except: pass
+            
+        self.active_toast = ToastNotification(self, title, message, is_error=is_error)
+        self.active_toast.show_toast()
         
     def closeEvent(self, event):
         """Saves the window size and position when the app is closed."""
@@ -1079,4 +1090,4 @@ class HubWindow(QMainWindow):
             for key, val in new_settings.items():
                 self.settings.setValue(key, val)
                 
-            QMessageBox.information(self, "Settings Saved", "Preferences updated successfully.\nSome changes (like Theme or Global Scalers) may require restarting the Suite to fully take effect.")
+            self.show_toast("Settings Saved", "Preferences updated successfully.\nSome changes (like Theme or Global Scalers) may require restarting the Suite to fully take effect.")

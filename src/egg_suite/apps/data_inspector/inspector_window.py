@@ -453,23 +453,40 @@ class DataInspectorWindow(QMainWindow):
         if not dataset:
             self.df = pd.DataFrame()
             self.table_model.set_dataframe(self.df)
-            self.stats_label.setText("Rows: 0 | Columns: 0")
+            if hasattr(self, 'stats_label'):
+                self.stats_label.setText("Rows: 0 | Columns: 0")
             
             # Disable the menu item when no data is loaded
-            self.action_error_prop.setEnabled(False)
+            if hasattr(self, 'action_error_prop'):
+                self.action_error_prop.setEnabled(False)
             return
 
         # Dynamically build the column headers from the dataset's dictionary
         num_cols = dataset.num_inputs + getattr(dataset, 'num_outputs', 0)
         cols = [dataset.column_names.get(i, f"Column {i}") for i in range(num_cols)]
         
+        # --- FIX: Safely route the data extraction based on the file format! ---
+        data_array = None
+        if hasattr(dataset, 'data') and dataset.data is not None:
+            data_array = dataset.data
+        elif hasattr(dataset, 'sweeps') and len(dataset.sweeps) > 0:
+            data_array = dataset.sweeps[0].data
+            
+        if data_array is None:
+            data_array = [] # Absolute failsafe for empty arrays
+        # -----------------------------------------------------------------------
+        
         # Convert the massive NumPy array into a Pandas DataFrame instantly
-        self.df = pd.DataFrame(dataset.data, columns=cols)
+        self.df = pd.DataFrame(data_array, columns=cols)
         
         # Push it to the UI
         self.table_model.set_dataframe(self.df)
-        self.stats_label.setText(f"Rows: {len(self.df):,} | Columns: {len(self.df.columns)}")
+        if hasattr(self, 'stats_label'):
+            self.stats_label.setText(f"Rows: {len(self.df):,} | Columns: {len(self.df.columns)}")
         
         # Enable the menu item now that data is ready
-        self.action_error_prop.setEnabled(True)
-        self.table_view.clearSelection()
+        if hasattr(self, 'action_error_prop'):
+            self.action_error_prop.setEnabled(True)
+            
+        if hasattr(self, 'table_view'):
+            self.table_view.clearSelection()
