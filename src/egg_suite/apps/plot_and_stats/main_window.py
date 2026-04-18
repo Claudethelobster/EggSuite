@@ -20,7 +20,6 @@ from PyQt6.QtWidgets import (
 # Core imports
 from core.data_loader import DataLoaderThread, CSVDataset, Dataset, BADGERLOOP_AVAILABLE
 from apps.plot_and_stats.plot_worker import PlotWorkerThread, BackgroundWorker
-from apps.plot_and_stats.popouts import MatplotlibPopout
 from core.constants import PHYSICS_CONSTANTS, GREEK_MAP
 from ui.theme import theme
 from core.file_editor import FileEditor
@@ -3877,9 +3876,14 @@ class BadgerLoopQtGraph(QMainWindow):
         self.proxy = pg.SignalProxy(self.plot_widget.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
         
     def _popout_matplotlib(self):
-        # Pass the whole window so the popout can read the UI settings
-        self._mpl_popout = MatplotlibPopout(self) 
-        self._mpl_popout.show()
+        try:
+            from external_modules.matplot_translator import MatplotlibPopout
+            # Pass the whole window so the popout can read the UI settings
+            self._mpl_popout = MatplotlibPopout(self) 
+            self._mpl_popout.show()
+        except ImportError:
+            if hasattr(self, 'show_toast'):
+                self.show_toast("Missing Module", "The Matplotlib Translator plugin is not installed.", is_error=True)
         
     def go_home(self):
         """Hides the plotter and tells the Hub to reveal itself."""
