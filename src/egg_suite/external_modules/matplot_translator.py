@@ -3,9 +3,11 @@ import pyqtgraph as pg
 import numpy as np
 import re
 import html
-from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QWidget, QDialog
-from PyQt6.QtGui import QColor, QPainter, QIcon
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QDialog, 
+                             QTabWidget, QFormLayout, QLineEdit, QComboBox, 
+                             QPushButton, QDoubleSpinBox, QColorDialog, QDialogButtonBox, QLabel)
+from PyQt6.QtGui import QColor, QPainter, QIcon, QAction
+from PyQt6.QtCore import Qt, pyqtSignal
 from ui.theme import theme
 
 # --- Matplotlib Imports ---
@@ -17,7 +19,11 @@ except Exception:
     
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
+import matplotlib.colors as mcolors
 
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
 def get_mpl_linestyle(qpen):
     style = qpen.style()
     if style == Qt.PenStyle.SolidLine: return '-'
@@ -31,6 +37,14 @@ def get_mpl_linestyle(qpen):
 def qcolor_to_mpl_rgba(qcolor):
     """Bulletproof conversion: QColor to Matplotlib RGBA float tuple."""
     return (qcolor.redF(), qcolor.greenF(), qcolor.blueF(), qcolor.alphaF())
+
+def mpl_color_to_qcolor(mpl_color):
+    """Converts Matplotlib color (string, hex, or tuple) to QColor."""
+    try:
+        rgba = mcolors.to_rgba(mpl_color)
+        return QColor(int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255), int(rgba[3]*255))
+    except Exception:
+        return QColor(255, 255, 255)
 
 def extract_legends(main_window):
     """Builds a map of PlotDataItems to their clean legend names."""
@@ -92,27 +106,251 @@ def extract_live_styles(item):
     return p_line, sym, sym_size, b_sym, p_sym
 
 
+# ==========================================
+# CUSTOM UI WIDGETS
+# ==========================================
+class ColorButton(QPushButton):
+    colorChanged = pyqtSignal(QColor)
+    def __init__(self, color=None, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(26, 26)
+        self._color = color if color else QColor(255, 255, 255)
+        self.clicked.connect(self.pick_color)
+        self.update_style()
+        
+    def pick_color(self):
+        c = QColorDialog.getColor(self._color, self, "Select Color")
+        if c.isValid():
+            self._color = c
+            self.update_style()
+            self.colorChanged.emit(c)
+            
+    def update_style(self):
+        self.setStyleSheet(f"background-color: {self._color.name()}; border: 1px solid #777; border-radius: 4px;")
+        
+    def get_color(self):
+        return self._color
+
+
+class CustomFigureOptionsDialog(QDialog):
+    """A beautiful, native EggSuite replacement for Matplotlib's clunky options menu."""
+    def __init__(self, ax, parent=None):
+        super().__init__(parent)
+        self.ax = ax
+        self.setWindowTitle("Figure Options")
+        self.setMinimumWidth(380)
+        
+        self.lines = [line for line in self.ax.get_lines() if line.get_label() and not line.get_label().startswith('_')]
+        
+        self.ls_map = {'Solid': '-', 'Dashed': '--', 'DashDot': '-.', 'Dotted': ':', 'None': 'None'}
+        self.ls_map_inv = {v: k for k, v in self.ls_map.items()}
+        self.marker_map = {'Circle': 'o', 'Square': 's', 'Triangle Up': '^', 'Triangle Down': 'v', 'Diamond': 'd', 'Cross': '+', 'X': 'x', 'None': 'None'}
+        self.marker_map_inv = {v: k for k, v in self.marker_map.items()}
+        
+        self.layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        
+        self._build_axes_tab()
+        self._build_curves_tab()
+        
+        self.layout.addWidget(self.tabs)
+        
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Apply)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        btn_box.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.apply_changes)
+        
+        self.layout.addWidget(btn_box)
+        
+    def _build_axes_tab(self):
+        tab = QWidget()
+        form = QFormLayout(tab)
+        
+        self.title_edit = QLineEdit(self.ax.get_title())
+        form.addRow("Title:", self.title_edit)
+        
+        form.addRow(QLabel("<b>X-Axis</b>"), QWidget())
+        self.xmin_edit = QLineEdit(str(self.ax.get_xlim()[0]))
+        self.xmax_edit = QLineEdit(str(self.ax.get_xlim()[1]))
+        self.xlabel_edit = QLineEdit(self.ax.get_xlabel())
+        self.xscale_combo = QComboBox()
+        self.xscale_combo.addItems(["linear", "log"])
+        self.xscale_combo.setCurrentText(self.ax.get_xscale())
+        
+        form.addRow("Min:", self.xmin_edit)
+        form.addRow("Max:", self.xmax_edit)
+        form.addRow("Label:", self.xlabel_edit)
+        form.addRow("Scale:", self.xscale_combo)
+        
+        form.addRow(QLabel("<b>Y-Axis</b>"), QWidget())
+        self.ymin_edit = QLineEdit(str(self.ax.get_ylim()[0]))
+        self.ymax_edit = QLineEdit(str(self.ax.get_ylim()[1]))
+        self.ylabel_edit = QLineEdit(self.ax.get_ylabel())
+        self.yscale_combo = QComboBox()
+        self.yscale_combo.addItems(["linear", "log"])
+        self.yscale_combo.setCurrentText(self.ax.get_yscale())
+        
+        form.addRow("Min:", self.ymin_edit)
+        form.addRow("Max:", self.ymax_edit)
+        form.addRow("Label:", self.ylabel_edit)
+        form.addRow("Scale:", self.yscale_combo)
+        
+        self.tabs.addTab(tab, "Axes")
+
+    def _build_curves_tab(self):
+        tab = QWidget()
+        form = QFormLayout(tab)
+        
+        self.curve_combo = QComboBox()
+        for line in self.lines:
+            self.curve_combo.addItem(line.get_label())
+        self.curve_combo.currentIndexChanged.connect(self._load_curve_data)
+        form.addRow("Curve:", self.curve_combo)
+        
+        self.curve_label_edit = QLineEdit()
+        form.addRow("Label:", self.curve_label_edit)
+        
+        form.addRow(QLabel("<b>Line</b>"), QWidget())
+        self.line_style_combo = QComboBox()
+        self.line_style_combo.addItems(list(self.ls_map.keys()))
+        self.line_width_spin = QDoubleSpinBox()
+        self.line_width_spin.setRange(0, 20)
+        self.line_width_spin.setSingleStep(0.5)
+        self.line_color_btn = ColorButton()
+        
+        form.addRow("Line style:", self.line_style_combo)
+        form.addRow("Width:", self.line_width_spin)
+        form.addRow("Color:", self.line_color_btn)
+        
+        form.addRow(QLabel("<b>Marker</b>"), QWidget())
+        self.marker_style_combo = QComboBox()
+        self.marker_style_combo.addItems(list(self.marker_map.keys()))
+        self.marker_size_spin = QDoubleSpinBox()
+        self.marker_size_spin.setRange(0, 50)
+        self.marker_face_btn = ColorButton()
+        self.marker_edge_btn = ColorButton()
+        
+        form.addRow("Style:", self.marker_style_combo)
+        form.addRow("Size:", self.marker_size_spin)
+        form.addRow("Face color:", self.marker_face_btn)
+        form.addRow("Edge color:", self.marker_edge_btn)
+        
+        self.tabs.addTab(tab, "Curves")
+        if self.lines: self._load_curve_data(0)
+
+    def _load_curve_data(self, idx):
+        if idx < 0 or idx >= len(self.lines): return
+        line = self.lines[idx]
+        
+        self.curve_label_edit.setText(line.get_label())
+        self.line_style_combo.setCurrentText(self.ls_map_inv.get(line.get_linestyle(), 'Solid'))
+        self.line_width_spin.setValue(line.get_linewidth())
+        self.line_color_btn._color = mpl_color_to_qcolor(line.get_color())
+        self.line_color_btn.update_style()
+        
+        self.marker_style_combo.setCurrentText(self.marker_map_inv.get(line.get_marker(), 'None'))
+        self.marker_size_spin.setValue(line.get_markersize())
+        self.marker_face_btn._color = mpl_color_to_qcolor(line.get_markerfacecolor())
+        self.marker_face_btn.update_style()
+        self.marker_edge_btn._color = mpl_color_to_qcolor(line.get_markeredgecolor())
+        self.marker_edge_btn.update_style()
+
+    def _save_current_curve(self):
+        idx = self.curve_combo.currentIndex()
+        if idx < 0 or idx >= len(self.lines): return
+        line = self.lines[idx]
+        
+        # Update curve label in combo box cleanly
+        new_label = self.curve_label_edit.text()
+        line.set_label(new_label)
+        self.curve_combo.setItemText(idx, new_label)
+        
+        line.set_linestyle(self.ls_map[self.line_style_combo.currentText()])
+        line.set_linewidth(self.line_width_spin.value())
+        line.set_color(qcolor_to_mpl_rgba(self.line_color_btn.get_color()))
+        
+        line.set_marker(self.marker_map[self.marker_style_combo.currentText()])
+        line.set_markersize(self.marker_size_spin.value())
+        line.set_markerfacecolor(qcolor_to_mpl_rgba(self.marker_face_btn.get_color()))
+        line.set_markeredgecolor(qcolor_to_mpl_rgba(self.marker_edge_btn.get_color()))
+
+    def apply_changes(self):
+        try: self.ax.set_xlim([float(self.xmin_edit.text()), float(self.xmax_edit.text())])
+        except Exception: pass
+        try: self.ax.set_ylim([float(self.ymin_edit.text()), float(self.ymax_edit.text())])
+        except Exception: pass
+        
+        self.ax.set_title(self.title_edit.text())
+        self.ax.set_xlabel(self.xlabel_edit.text())
+        self.ax.set_ylabel(self.ylabel_edit.text())
+        self.ax.set_xscale(self.xscale_combo.currentText())
+        self.ax.set_yscale(self.yscale_combo.currentText())
+        
+        self._save_current_curve()
+
+    def accept(self):
+        self.apply_changes()
+        super().accept()
+
+
+# ==========================================
+# THE MAIN WINDOW
+# ==========================================
 class MatplotlibPopout(QMainWindow):
     def __init__(self, main_window, title="Detached Plot (Matplotlib)"):
         super().__init__()
+        self.main_window = main_window
         self.setWindowTitle(title)
         self.resize(800, 600)
         
         self.central = QWidget()
         self.setCentralWidget(self.central)
-        layout = QVBoxLayout(self.central)
+        self.layout = QVBoxLayout(self.central)
         
-        is_dark = QColor(theme.bg).lightness() < 128
-        bg_color = theme.panel_bg
-        fg_color = theme.fg
-        grid_color = "#444444" if is_dark else "#cccccc"
+        # Inherit theme state
+        self.is_dark_mode = QColor(theme.bg).lightness() < 128
+        self._apply_stylesheets()
         
-        input_bg = "#1e1e1e" if is_dark else "#ffffff"
-        input_border = "#777777" if is_dark else "#aaaaaa"
-        btn_bg = "#333333" if is_dark else "#e0e0e0"
-        btn_hover = "#4a4a4a" if is_dark else "#d0d0d0"
+        self.fig = Figure()
+        self.ax = self.fig.add_subplot(111)
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
         
-        # Target QDialog dynamically so it styles the spawned figure options menus
+        # --- MENU HIJACKING ---
+        # 1. Disable the native matplotlib option menu
+        for action in self.toolbar.actions():
+            if 'Customize' in action.text() or 'Edit axes' in action.toolTip():
+                try: action.triggered.disconnect()
+                except: pass
+                action.triggered.connect(self._open_custom_settings)
+        
+        # 2. Add the Lightbulb Toggle
+        self.toolbar.addSeparator()
+        self.theme_action = QAction("💡 Toggle Theme", self)
+        self.theme_action.setToolTip("Switch Matplotlib background between Light and Dark mode")
+        self.theme_action.triggered.connect(self._toggle_theme)
+        self.toolbar.addAction(self.theme_action)
+        # ----------------------
+        
+        self.layout.addWidget(self.toolbar)
+        self.layout.addWidget(self.canvas)
+        
+        self._refresh_plot()
+
+    def _open_custom_settings(self):
+        """Intercepts the native menu click and spawns our beautiful replacement."""
+        dlg = CustomFigureOptionsDialog(self.ax, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted or dlg.result() == QDialog.DialogCode.Accepted:
+            # When changes are applied, force the legend to rebuild securely!
+            self._rebuild_legend_securely()
+            self.canvas.draw_idle()
+
+    def _apply_stylesheets(self):
+        input_bg = "#1e1e1e" if self.is_dark_mode else "#ffffff"
+        input_border = "#777777" if self.is_dark_mode else "#aaaaaa"
+        btn_bg = "#333333" if self.is_dark_mode else "#e0e0e0"
+        btn_hover = "#4a4a4a" if self.is_dark_mode else "#d0d0d0"
+        
         self.setStyleSheet(f"""
             QMainWindow {{ background-color: {theme.panel_bg}; }}
             
@@ -152,10 +390,23 @@ class MatplotlibPopout(QMainWindow):
                 background-color: {theme.panel_bg}; color: {theme.fg}; 
                 border-bottom: 1px solid {theme.panel_bg}; font-weight: bold; 
             }}
+            
+            QGroupBox {{ font-weight: bold; padding-top: 15px; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}
         """)
+
+    def _toggle_theme(self):
+        """Inverts the Matplotlib canvas theme and instantly redraws."""
+        self.is_dark_mode = not self.is_dark_mode
+        self._apply_stylesheets()
         
-        self.fig = Figure(facecolor=bg_color)
-        self.ax = self.fig.add_subplot(111)
+        bg_color = theme.panel_bg if self.is_dark_mode else "#ffffff"
+        fg_color = theme.fg if self.is_dark_mode else "#000000"
+        grid_color = "#444444" if self.is_dark_mode else "#cccccc"
+        toolbar_bg = theme.panel_bg if self.is_dark_mode else theme.border
+        
+        self.toolbar.setStyleSheet(f"QToolBar {{ background-color: {toolbar_bg}; border: none; }}")
+        self.fig.patch.set_facecolor(bg_color)
         self.ax.set_facecolor(bg_color)
         
         for spine in self.ax.spines.values():
@@ -165,17 +416,60 @@ class MatplotlibPopout(QMainWindow):
         self.ax.yaxis.label.set_color(fg_color)
         self.ax.title.set_color(fg_color)
         
-        self.canvas = FigureCanvasQTAgg(self.fig)
-        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        # Force grid color update
+        if self.ax.get_xgridlines() and self.ax.get_ygridlines():
+            show_x = self.main_window.grid_x_cb.isChecked()
+            show_y = self.main_window.grid_y_cb.isChecked()
+            try: alpha = float(self.main_window.grid_alpha_edit.text())
+            except ValueError: alpha = 0.35
+            
+            if show_x and show_y: self.ax.grid(True, axis='both', color=grid_color, linestyle='--', alpha=alpha)
+            elif show_x: self.ax.grid(True, axis='x', color=grid_color, linestyle='--', alpha=alpha)
+            elif show_y: self.ax.grid(True, axis='y', color=grid_color, linestyle='--', alpha=alpha)
         
-        # CRITICAL FIX: Only apply 'border: none' to the QToolBar itself!
-        toolbar_bg = theme.panel_bg if is_dark else theme.border
+        self._rebuild_legend_securely()
+        self.canvas.draw_idle()
+
+    def _rebuild_legend_securely(self):
+        """Builds the legend while strictly enforcing dark mode and custom marker sizes."""
+        if not self.ax.get_lines(): return
+        
+        bg_color = theme.panel_bg if self.is_dark_mode else "#ffffff"
+        fg_color = theme.fg if self.is_dark_mode else "#000000"
+        grid_color = "#444444" if self.is_dark_mode else "#cccccc"
+        
+        # Check if we actually have labeled lines
+        has_labels = any(l.get_label() and not l.get_label().startswith('_') for l in self.ax.get_lines())
+        if not has_labels: return
+        
+        legend = self.ax.legend(facecolor=bg_color, edgecolor=grid_color)
+        for text in legend.get_texts():
+            text.set_color(fg_color)
+            
+        # Brute-force the legend marker sizes to perfectly match the canvas!
+        handles = getattr(legend, 'legend_handles', getattr(legend, 'legendHandles', []))
+        for handle, original_line in zip(handles, self.ax.get_lines()):
+            if hasattr(handle, 'set_markersize'):
+                handle.set_markersize(original_line.get_markersize())
+            if hasattr(handle, 'set_linewidth'):
+                handle.set_linewidth(original_line.get_linewidth())
+
+    def _refresh_plot(self):
+        """Clears the axes and completely rebuilds the Matplotlib figure from the Qt canvas."""
+        self.ax.clear()
+        
+        bg_color = theme.panel_bg if self.is_dark_mode else "#ffffff"
+        fg_color = theme.fg if self.is_dark_mode else "#000000"
+        grid_color = "#444444" if self.is_dark_mode else "#cccccc"
+        toolbar_bg = theme.panel_bg if self.is_dark_mode else theme.border
+        
         self.toolbar.setStyleSheet(f"QToolBar {{ background-color: {toolbar_bg}; border: none; }}")
         
-        if is_dark:
+        # Theme the toolbar icons dynamically
+        if self.is_dark_mode:
             for action in self.toolbar.actions():
                 icon = action.icon()
-                if not icon.isNull():
+                if not icon.isNull() and action != self.theme_action:
                     pixmap = icon.pixmap(24, 24)
                     painter = QPainter(pixmap)
                     painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
@@ -183,26 +477,33 @@ class MatplotlibPopout(QMainWindow):
                     painter.end()
                     action.setIcon(QIcon(pixmap))
         
-        layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas)
+        self.fig.patch.set_facecolor(bg_color)
+        self.ax.set_facecolor(bg_color)
         
-        self._translate_plot(main_window, grid_color, bg_color, fg_color)
+        for spine in self.ax.spines.values():
+            spine.set_color(fg_color)
+        self.ax.tick_params(colors=fg_color, which='both')
+        self.ax.xaxis.label.set_color(fg_color)
+        self.ax.yaxis.label.set_color(fg_color)
+        self.ax.title.set_color(fg_color)
+        
+        self._translate_plot(grid_color, bg_color, fg_color)
+        self.canvas.draw()
 
-    def _translate_plot(self, main_window, grid_color, bg_color, fg_color):
-        original_plot = main_window.plot_widget
-        item_to_name = extract_legends(main_window)
+    def _translate_plot(self, grid_color, bg_color, fg_color):
+        original_plot = self.main_window.plot_widget
+        item_to_name = extract_legends(self.main_window)
         
         bottom_axis = original_plot.getAxis('bottom')
         left_axis = original_plot.getAxis('left')
         if bottom_axis.isVisible(): self.ax.set_xlabel(bottom_axis.labelText)
         if left_axis.isVisible(): self.ax.set_ylabel(left_axis.labelText)
         
-        xlog = main_window.xscale.currentText() == "Log"
-        ylog = main_window.yscale.currentText() == "Log"
-        xbase = main_window._parse_log_base(main_window.xbase.text())
-        ybase = main_window._parse_log_base(main_window.ybase.text())
+        xlog = self.main_window.xscale.currentText() == "Log"
+        ylog = self.main_window.yscale.currentText() == "Log"
+        xbase = self.main_window._parse_log_base(self.main_window.xbase.text())
+        ybase = self.main_window._parse_log_base(self.main_window.ybase.text())
         
-        has_labels = False
         mpl_symbols = {'o':'o', 's':'s', 't':'^', 't1':'^', 't2':'v', 't3':'>', 'd':'d', '+':'+', 'x':'x', 'p':'p', 'h':'h', 'star':'*'}
 
         for item in original_plot.listDataItems():
@@ -236,7 +537,6 @@ class MatplotlibPopout(QMainWindow):
             edge_color = 'none' if p_sym.style() == Qt.PenStyle.NoPen else qcolor_to_mpl_rgba(p_sym.color())
 
             name = item_to_name.get(item, getattr(item, 'opts', {}).get('name', None))
-            if name: has_labels = True
                     
             self.ax.plot(x, y, color=line_color, linewidth=width, linestyle=linestyle, 
                          marker=marker, markersize=sym_size, 
@@ -245,11 +545,20 @@ class MatplotlibPopout(QMainWindow):
         if xlog: self.ax.set_xscale('log', base=xbase)
         if ylog: self.ax.set_yscale('log', base=ybase)
                 
-        self.ax.grid(True, color=grid_color, linestyle='--', alpha=0.5)
+        # --- Synchronised Dynamic Gridlines ---
+        show_x = self.main_window.grid_x_cb.isChecked()
+        show_y = self.main_window.grid_y_cb.isChecked()
+        try: alpha = float(self.main_window.grid_alpha_edit.text())
+        except ValueError: alpha = 0.35
         
-        if has_labels:
-            legend = self.ax.legend(facecolor=bg_color, edgecolor=grid_color)
-            for text in legend.get_texts():
-                text.set_color(fg_color)
-                
+        if show_x and show_y:
+            self.ax.grid(True, axis='both', color=grid_color, linestyle='--', alpha=alpha)
+        elif show_x:
+            self.ax.grid(True, axis='x', color=grid_color, linestyle='--', alpha=alpha)
+        elif show_y:
+            self.ax.grid(True, axis='y', color=grid_color, linestyle='--', alpha=alpha)
+        else:
+            self.ax.grid(False)
+            
+        self._rebuild_legend_securely()
         self.fig.tight_layout()
