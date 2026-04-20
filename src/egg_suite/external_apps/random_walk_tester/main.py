@@ -4,16 +4,18 @@ from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QWidget, QPushButton, QHBo
 from PyQt6.QtCore import Qt
 
 class RandomWalkApp(QMainWindow):
-    def __init__(self, workspace, current_theme):
+    def __init__(self, api):
         super().__init__()
-        self.workspace = workspace
-        self.theme = current_theme
+        self.api = api
         
-        self.setWindowTitle("Random Walk Simulator (External Plugin)")
+        # Fetch the theme colours securely through the API
+        self.colours = self.api.get_theme_colours()
+        
+        self.setWindowTitle("Random Walk Simulator (API Version)")
         self.resize(800, 600)
         
-        # Apply the EggSuite theme!
-        self.setStyleSheet(f"background-color: {self.theme.bg}; color: {self.theme.fg};")
+        # Apply the EggSuite theme using the API dictionary
+        self.setStyleSheet(f"background-color: {self.colours['bg']}; color: {self.colours['fg']};")
         
         central = QWidget()
         self.setCentralWidget(central)
@@ -21,11 +23,11 @@ class RandomWalkApp(QMainWindow):
         
         # Build the Plot
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground(self.theme.panel_bg)
+        self.plot_widget.setBackground(self.colours['panel_bg'])
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         
         # Add a custom curve
-        self.curve = pg.PlotCurveItem(pen=pg.mkPen(self.theme.primary_bg, width=2))
+        self.curve = pg.PlotCurveItem(pen=pg.mkPen(self.colours['primary_bg'], width=2))
         self.plot_widget.addItem(self.curve)
         
         layout.addWidget(self.plot_widget)
@@ -36,8 +38,8 @@ class RandomWalkApp(QMainWindow):
         self.btn_generate.setStyleSheet(f"""
             QPushButton {{
                 font-weight: bold; padding: 10px; 
-                background-color: {self.theme.primary_bg}; color: {self.theme.primary_text}; 
-                border: 1px solid {self.theme.primary_border}; border-radius: 4px;
+                background-color: {self.colours['primary_bg']}; color: {self.colours['primary_text']}; 
+                border: 1px solid {self.colours['primary_border']}; border-radius: 4px;
             }}
             QPushButton:hover {{ border: 1px solid white; }}
         """)
@@ -55,22 +57,19 @@ class RandomWalkApp(QMainWindow):
     def generate_walk(self):
         """Generates a 10,000 point 2D random walk."""
         steps = 10000
-        # Generate random steps of -1 or 1
         x_steps = np.random.choice([-1, 1], size=steps)
         y_steps = np.random.choice([-1, 1], size=steps)
         
-        # Calculate cumulative sum to get the walk path
         x_pos = np.cumsum(x_steps)
         y_pos = np.cumsum(y_steps)
         
         self.curve.setData(x_pos, y_pos)
 
 # --- THE MANDATORY ENTRY POINT ---
-def run_app(workspace, current_theme):
+def run_app(api):
     """
-    This function is called by the EggSuite Hub when the user clicks 'Launch'.
-    It must accept the workspace and theme, and return a QMainWindow or QDialog.
+    This function is called by the EggSuite PluginManager.
+    It accepts the secure API and returns the window.
     """
-    # We instantiate the window and return it to the Hub so it isn't garbage collected
-    window = RandomWalkApp(workspace, current_theme)
+    window = RandomWalkApp(api)
     return window

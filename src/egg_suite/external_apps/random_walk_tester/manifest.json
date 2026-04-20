@@ -3,6 +3,11 @@
     "description": "A test plugin that generates a 2D random walk to verify external app integration and PyQtGraph rendering.",
     "author": "EggSuite Dev",
     "version": "1.0",
-    "icon": "🚶",
-    "entry_point": "main.py"
+    "icon": "\ud83d\udeb6",
+    "entry_point": "main.py",
+    "dependencies": [
+        "numpy",
+        "pyqtgraph"
+    ],
+    "pinned": false
 }

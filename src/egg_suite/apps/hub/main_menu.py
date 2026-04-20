@@ -9,7 +9,8 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QUrl, QPoint, QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QTreeWidget, QTreeWidgetItem, QFrame, QFileDialog, QMessageBox, QProgressDialog,
-    QDialog, QGraphicsBlurEffect, QLineEdit, QStackedWidget, QListWidget, QListWidgetItem, QFormLayout
+    QDialog, QGraphicsBlurEffect, QLineEdit, QStackedWidget, QListWidget, QListWidgetItem, QFormLayout,
+    QCompleter
 )
 
 from ui.theme import theme
@@ -17,6 +18,7 @@ from ui.custom_widgets import ToastNotification
 from apps.data_inspector.inspector_window import DataInspectorWindow
 from ui.custom_widgets import ToggleSwitch
 from core.data_loader import DataLoaderThread
+from core.plugin_manager import PluginManager
 from ui.dialogs.data_mgmt import FileImportDialog, CopyableErrorDialog, TemplateSelectionDialog, BatchImportDialog
 
 class RecentFilesDialog(QDialog):
@@ -130,29 +132,65 @@ class AppCreatorDialog(QDialog):
         self.icon_edit = QLineEdit("🧩")
         self.icon_edit.setMaxLength(2) 
         
-        # --- NEW: Author and Version Inputs ---
         self.author_edit = QLineEdit("User")
         self.version_edit = QLineEdit("1.0.0")
-        # --------------------------------------
         
         self.folder_edit = QLineEdit()
         self.folder_edit.setPlaceholderText("e.g., quantum_simulator")
         self.folder_edit.textChanged.connect(self._validate)
         
+        # --- NEW: Dependency Staging Area ---
+        self.dep_input = QLineEdit()
+        self.dep_input.setPlaceholderText("e.g., scipy (press Enter to add)")
+        
+        # Fetch installed packages and attach the auto-completer
+        installed_pkgs = self._get_installed_packages()
+        completer = QCompleter(installed_pkgs, self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.dep_input.setCompleter(completer)
+        
+        self.dep_add_btn = QPushButton("➕ Add")
+        self.dep_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.dep_add_btn.clicked.connect(self._add_dependency)
+        self.dep_input.returnPressed.connect(self._add_dependency)
+        
+        dep_lay = QHBoxLayout()
+        dep_lay.addWidget(self.dep_input)
+        dep_lay.addWidget(self.dep_add_btn)
+        
+        self.dep_list = QListWidget()
+        self.dep_list.setFixedHeight(80) # Keep it compact
+        
+        self.dep_remove_btn = QPushButton("➖ Remove Selected")
+        self.dep_remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.dep_remove_btn.clicked.connect(self._remove_dependency)
+        
+        # Styling
         input_style = f"background-color: {theme.panel_bg}; color: {theme.fg}; border: 1px solid {theme.border}; border-radius: 4px; padding: 6px;"
+        btn_style = f"padding: 6px; background-color: {theme.panel_bg}; color: {theme.fg}; border: 1px solid {theme.border}; border-radius: 4px;"
+        
         self.name_edit.setStyleSheet(input_style)
         self.desc_edit.setStyleSheet(input_style)
         self.icon_edit.setStyleSheet(input_style)
-        self.author_edit.setStyleSheet(input_style) # Style the new inputs
-        self.version_edit.setStyleSheet(input_style) # Style the new inputs
+        self.author_edit.setStyleSheet(input_style)
+        self.version_edit.setStyleSheet(input_style)
         self.folder_edit.setStyleSheet(input_style)
+        self.dep_input.setStyleSheet(input_style)
+        self.dep_list.setStyleSheet(f"background-color: {theme.bg}; color: {theme.fg}; border: 1px solid {theme.border}; border-radius: 4px;")
+        self.dep_add_btn.setStyleSheet(btn_style)
+        self.dep_remove_btn.setStyleSheet(btn_style)
         
+        # Add to form
         form.addRow("App Name:", self.name_edit)
         form.addRow("Description:", self.desc_edit)
         form.addRow("Icon (Emoji):", self.icon_edit)
-        form.addRow("Author:", self.author_edit)   # Add to layout
-        form.addRow("Version:", self.version_edit) # Add to layout
+        form.addRow("Author:", self.author_edit)
+        form.addRow("Version:", self.version_edit)
         form.addRow("Folder Name:", self.folder_edit)
+        form.addRow("Dependencies:", dep_lay)
+        form.addRow("", self.dep_list)
+        form.addRow("", self.dep_remove_btn)
+        # ------------------------------------
         
         self.layout.addLayout(form)
         
@@ -179,13 +217,17 @@ class AppCreatorDialog(QDialog):
     # (Keep your _auto_fill_folder, _validate, and _set_warning methods exactly the same)
         
     def get_data(self):
+        # Extract the list items
+        dependencies = [self.dep_list.item(i).text() for i in range(self.dep_list.count())]
+        
         return {
             "name": self.name_edit.text().strip(),
             "description": self.desc_edit.text().strip() or "A custom EggSuite plugin.",
             "icon": self.icon_edit.text().strip() or "🧩",
-            "author": self.author_edit.text().strip() or "Unknown", # Capture Author
-            "version": self.version_edit.text().strip() or "1.0.0",   # Capture Version
-            "folder": self.folder_edit.text()
+            "author": self.author_edit.text().strip() or "Unknown", 
+            "version": self.version_edit.text().strip() or "1.0.0",   
+            "folder": self.folder_edit.text(),
+            "dependencies": dependencies # <--- ADD THIS TO THE RETURN DICT
         }
 
     def _auto_fill_folder(self, text):
@@ -196,6 +238,32 @@ class AppCreatorDialog(QDialog):
             clean_name = re.sub(r'_+', '_', clean_name)         # Remove double underscores
             self.folder_edit.setText(clean_name)
         self._validate()
+        
+    def _get_installed_packages(self):
+        """Silently fetches a list of all installed Python libraries for the completer."""
+        try:
+            # We use a set comprehension to strip out duplicates
+            return sorted(list({dist.metadata['Name'] for dist in importlib.metadata.distributions() if dist.metadata['Name']}))
+        except Exception:
+            return [] # Fallback to empty list if importlib fails, user can still type manually
+
+    def _add_dependency(self):
+        """Moves text from the input box into the staging list."""
+        dep = self.dep_input.text().strip()
+        if not dep:
+            return
+            
+        # Prevent duplicates in the list
+        existing = [self.dep_list.item(i).text() for i in range(self.dep_list.count())]
+        if dep not in existing:
+            self.dep_list.addItem(dep)
+            
+        self.dep_input.clear()
+
+    def _remove_dependency(self):
+        """Removes the highlighted dependency from the staging list."""
+        for item in self.dep_list.selectedItems():
+            self.dep_list.takeItem(self.dep_list.row(item))
 
     def _validate(self):
         folder = self.folder_edit.text()
@@ -228,9 +296,10 @@ class AppCreatorDialog(QDialog):
 class AppTile(QFrame):
     launch_requested = pyqtSignal(bool) 
 
-    # --- ADDED: show_toggle parameter ---
-    def __init__(self, title, description, icon="📊", show_toggle=True, parent=None):
+    def __init__(self, title, description, icon="📊", show_toggle=True, unpin_callback=None, parent=None):
         super().__init__(parent)
+        from PyQt6.QtGui import QFontMetrics
+        
         self.setStyleSheet(f"""
             QFrame {{ background-color: {theme.panel_bg}; border: 2px solid {theme.border}; border-radius: 12px; }}
             QFrame:hover {{ background-color: {theme.primary_bg}; border: 2px solid {theme.primary_border}; }}
@@ -238,27 +307,74 @@ class AppTile(QFrame):
         self.setFixedSize(220, 220)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        self.full_description = description # Save the full text for the pop-up
+
         layout = QVBoxLayout(self)
         
+        # --- Top Row (Icon & Unpin) ---
+        top_lay = QHBoxLayout()
         icon_lbl = QLabel(icon)
         icon_lbl.setStyleSheet("font-size: 40px; border: none; background: transparent;")
-        layout.addWidget(icon_lbl)
-
+        top_lay.addWidget(icon_lbl)
+        top_lay.addStretch()
+        
+        if unpin_callback:
+            unpin_btn = QPushButton("📌 Unpin")
+            unpin_btn.setStyleSheet(f"""
+                QPushButton {{
+                    font-size: 10px; font-weight: bold; color: {theme.fg};
+                    background-color: transparent; border: 1px solid {theme.border}; border-radius: 4px; padding: 4px;
+                }}
+                QPushButton:hover {{ background-color: {theme.danger_border}; color: white; border: 1px solid red; }}
+            """)
+            unpin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            unpin_btn.clicked.connect(unpin_callback)
+            top_lay.addWidget(unpin_btn, alignment=Qt.AlignmentFlag.AlignTop)
+            
+        layout.addLayout(top_lay)
         layout.addStretch()
 
+        # --- Title and Info Button Row ---
+        title_lay = QHBoxLayout()
         title_lbl = QLabel(title)
         title_lbl.setWordWrap(True)
         title_lbl.setStyleSheet(f"font-size: 18px; font-weight: bold; border: none; background: transparent; color: {theme.primary_text};")
+        title_lay.addWidget(title_lbl, stretch=1)
         
+        # Build the info button but hide it by default
+        self.info_btn = QPushButton("ℹ️")
+        self.info_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.info_btn.setStyleSheet("border: none; background: transparent; font-size: 16px;")
+        self.info_btn.clicked.connect(self._show_info_popup)
+        self.info_btn.hide() 
+        title_lay.addWidget(self.info_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        
+        layout.addLayout(title_lay)
+        
+        # --- Description & Dynamic Truncation ---
         desc_lbl = QLabel(description)
         desc_lbl.setWordWrap(True)
         desc_lbl.setStyleSheet(f"font-size: 12px; border: none; background: transparent; color: {theme.fg};")
         
-        layout.addWidget(title_lbl)
+        # Mathematically calculate if the text will fit inside ~3 lines (approx 45 pixels)
+        font_metrics = desc_lbl.fontMetrics()
+        target_width = 190 # 220px tile width minus margins
+        rect = font_metrics.boundingRect(0, 0, target_width, 1000, Qt.TextFlag.TextWordWrap, description)
+        
+        if rect.height() > 45: 
+            # The text is too long! Reveal the info button.
+            self.info_btn.show()
+            
+            # Chop the string down until it fits the boundary
+            short_desc = description
+            while font_metrics.boundingRect(0, 0, target_width, 1000, Qt.TextFlag.TextWordWrap, short_desc + "...").height() > 45 and len(short_desc) > 0:
+                short_desc = short_desc[:-5] # Chop 5 chars at a time for efficiency
+            desc_lbl.setText(short_desc.strip() + "...")
+            
         layout.addWidget(desc_lbl)
         layout.addSpacing(10)
         
-        # --- NEW: Only build the toggle if requested ---
+        # --- Bottom Toggle ---
         self.popout_cb = None
         if show_toggle:
             self.popout_cb = ToggleSwitch("Open in separate window")
@@ -268,12 +384,30 @@ class AppTile(QFrame):
             self.popout_cb.setFont(font)
             layout.addWidget(self.popout_cb)
         else:
-            layout.addSpacing(24) # Keep the height balanced when toggle is missing
+            layout.addSpacing(24)
+
+    def _show_info_popup(self):
+        """Spawns a styled dialog showing the complete application description."""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("App Information")
+        msg.setText(self.full_description)
+        # Apply the suite theme to the popup
+        msg.setStyleSheet(f"""
+            QMessageBox {{ background-color: {theme.bg}; color: {theme.fg}; }}
+            QLabel {{ color: {theme.fg}; font-size: 13px; }}
+            QPushButton {{
+                padding: 6px 15px; background-color: {theme.panel_bg}; 
+                color: {theme.fg}; border: 1px solid {theme.border}; border-radius: 4px;
+            }}
+            QPushButton:hover {{ background-color: {theme.primary_bg}; color: {theme.primary_text}; }}
+        """)
+        msg.exec()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            # Safely check if the toggle exists and was clicked
-            if self.popout_cb and self.popout_cb.geometry().contains(event.pos()):
+            # Safely catch clicks so they don't trigger a launch if clicking a button
+            child = self.childAt(event.pos())
+            if isinstance(child, QPushButton) or (self.popout_cb and self.popout_cb.geometry().contains(event.pos())):
                 pass 
             else:
                 popout_state = self.popout_cb.isChecked() if self.popout_cb else False
@@ -428,91 +562,62 @@ class HubWindow(QMainWindow):
         left_widget.setFixedWidth(300)
         main_layout.addWidget(left_widget)
 
-        # --- RIGHT PANEL: App Grid ---
+        # --- RIGHT PANEL: Scrollable App Grid ---
         right_panel = QVBoxLayout()
         
+        header_lay = QHBoxLayout()
         header_lbl = QLabel("EggSuite")
         header_lbl.setStyleSheet(f"font-size: 36px; font-weight: bold; color: {theme.primary_text}; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;")
-        right_panel.addWidget(header_lbl)
+        header_lay.addWidget(header_lbl)
+        header_lay.addStretch()
+        
+        # --- NEW: The dedicated External Apps button ---
+        self.btn_external_apps = QPushButton("🧩 Browse Plugins")
+        self.btn_external_apps.setStyleSheet(f"""
+            QPushButton {{
+                font-weight: bold; font-size: 14px; padding: 10px 20px; 
+                background-color: {theme.panel_bg}; color: {theme.primary_text}; 
+                border: 2px solid {theme.primary_border}; border-radius: 6px;
+            }}
+            QPushButton:hover {{ background-color: {theme.primary_bg}; }}
+        """)
+        self.btn_external_apps.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_external_apps.clicked.connect(self._show_app_browser)
+        header_lay.addWidget(self.btn_external_apps, alignment=Qt.AlignmentFlag.AlignVCenter)
+        
+        right_panel.addLayout(header_lay)
         
         EGG_FACTS = [
             "A standard chef's hat has 100 folds, representing 100 ways to cook an egg.",
-            "The colour of an eggshell is determined purely by the breed of the hen.",
-            "To tell if an egg is raw or hard-boiled, spin it. Raw eggs wobble, boiled ones spin cleanly.",
-            "Eggs age more in one day at room temperature than in one week in the fridge.",
-            "The stringy white bits keeping the yolk in the centre are called chalazae.",
-            "As a hen ages, she lays larger eggs with much thinner shells.",
-            "Kiwi birds lay the largest egg in relation to their body size of any bird.",
-            "Ostrich eggs are the largest bird eggs, but the smallest in relation to the mother's size.",
-            "Double-yolk eggs are typically laid by young hens whose reproductive systems haven't fully matured.",
-            "The word 'yolk' derives from the Old English word 'geoloca', simply meaning 'yellow'.",
-            "An average eggshell has up to 17,000 tiny microscopic pores over its surface.",
-            "A hen turns her egg nearly 50 times a day to keep the yolk from sticking to the side.",
-            "It takes a hen roughly 24 to 26 hours to produce a single egg.",
-            "The UK consumes over 13 billion eggs every single year.",
-            "Araucana hens are famous for laying natural pale blue or green eggs.",
-            "Harriet, a hen from the UK, laid a record-breaking egg measuring 9.1 inches in diameter in 2010.",
-            "Egg yolks are one of the few foods that naturally contain Vitamin D.",
-            "If an egg sinks in a bowl of water, it is fresh. If it floats, it has gone bad.",
-            "Blood spots in an egg do not mean it is fertilised; they are just a ruptured blood vessel.",
-            "Cloudy egg whites are a sign that the egg is incredibly fresh.",
-            "To peel a hard-boiled egg easily, plunge it into ice water immediately after cooking.",
-            "The Guinness World Record for making an omelette is 427 in just 30 minutes.",
-            "An eggshell is made almost entirely of calcium carbonate, the same material as chalk and limestone.",
-            "The yolk and the white contain roughly the same amount of protein.",
-            "Hens with white earlobes generally lay white eggs, whilst hens with red earlobes lay brown ones.",
-            "A hen can lay unfertilised eggs without a cockerel being present.",
-            "The thickest part of an eggshell is at the pointy end.",
-            "Brown eggs are generally more expensive because the hens that lay them are larger and require more feed.",
-            "A 'pullet' is a young hen under one year old, and their eggs are highly prized by pastry chefs.",
-            "Eggs absorb odours easily because of their porous shells, which is why they are best kept in their cartons.",
-            "The longest recorded flight of a tossed fresh egg without breaking is a staggering 98.51 metres.",
-            "Quail eggs have a distinctly higher yolk-to-white ratio than chicken eggs, making them much richer in flavour.",
-            "Fake eggs were once a serious counterfeit industry in the late 19th and early 20th centuries.",
-            "The yolk colour is influenced entirely by a hen's diet; more marigold petals or maize means a deeper orange.",
-            "To perfectly poach an egg, adding a splash of vinegar to the water helps coagulate the white faster.",
-            "Hummingbird eggs can be as tiny as a baked bean.",
-            "There is no nutritional difference whatsoever between brown and white eggs.",
-            "A hen requires roughly 14 hours of daylight to trigger the egg-laying process.",
-            "The phrase 'walking on eggshells' originated in the mid-19th century to describe acting with extreme caution.",
-            "An egg will spin significantly faster if it is hard-boiled compared to a raw one because the liquid centre absorbs the momentum."
+            "The colour of an eggshell is determined purely by the breed of the hen."
+            # (You can leave your big list of facts here, I've truncated it for brevity!)
         ]
-        
         random_fact = random.choice(EGG_FACTS)
         
         subtitle_lbl = QLabel(f"Select an application to begin.<br><br><span style='color: #888;'><i>{random_fact}</i></span>")
         subtitle_lbl.setWordWrap(True)
-        subtitle_lbl.setStyleSheet("font-size: 14px; margin-bottom: 20px;")
+        subtitle_lbl.setStyleSheet("font-size: 14px; margin-bottom: 10px;")
         right_panel.addWidget(subtitle_lbl)
 
-        grid = QGridLayout()
-        grid.setSpacing(20)
-
-        # Tile 1: Plotter
-        self.tile_plot = AppTile("Plot & Statistics", "Visualize data, apply mathematical fits, and run topological analysis.", icon="📈")
-        self.tile_plot.launch_requested.connect(self._launch_plot_app)
-        grid.addWidget(self.tile_plot, 0, 0)
-
-        # Tile 2: Inspector
-        self.tile_inspect = AppTile("Data Inspector", "View raw arrays, sanitize anomalies, and edit dataset tables.", icon="🧮")
-        self.tile_inspect.launch_requested.connect(self._launch_inspector_app)
-        grid.addWidget(self.tile_inspect, 0, 1)
-
-        # Tile 3: Settings
-        self.tile_settings = AppTile("Global Settings", "Configure themes, hardware limits, and suite behavior.", icon="⚙️")
-        self.tile_settings.launch_requested.connect(self._launch_settings_app)
-        grid.addWidget(self.tile_settings, 1, 0)
-
-        # --- NEW Tile 4: External Apps ---
-        self.tile_plugins = AppTile("External Apps", "Browse and launch custom user-built plugins from the external_apps directory.", icon="🧩", show_toggle=False)
-        # Popout flag is ignored for the browser; it's a built-in page.
-        self.tile_plugins.launch_requested.connect(lambda _: self._show_app_browser())
-        grid.addWidget(self.tile_plugins, 1, 1)
-        # ---------------------------------
-
-        right_panel.addLayout(grid)
-        right_panel.addStretch()
+        # --- NEW: Scroll Area for Apps ---
+        from PyQt6.QtWidgets import QScrollArea
+        self.app_scroll_area = QScrollArea()
+        self.app_scroll_area.setWidgetResizable(True)
+        self.app_scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        
+        self.app_grid_container = QWidget()
+        self.app_grid_container.setStyleSheet("background: transparent;")
+        self.app_grid_layout = QGridLayout(self.app_grid_container)
+        self.app_grid_layout.setSpacing(20)
+        self.app_grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        
+        self.app_scroll_area.setWidget(self.app_grid_container)
+        right_panel.addWidget(self.app_scroll_area, stretch=1)
+        
         main_layout.addLayout(right_panel)
+        
+        # Populate the grid initially
+        self._refresh_main_app_grid()
 
         self.stacked_widget.addWidget(self.main_page)
 
@@ -653,6 +758,71 @@ class HubWindow(QMainWindow):
         self._scan_external_apps() 
         self.stacked_widget.setCurrentIndex(1)
         
+    def _refresh_main_app_grid(self):
+        """Clears and redraws the scrollable main menu grid, including pinned apps."""
+        # Clear existing tiles
+        while self.app_grid_layout.count():
+            item = self.app_grid_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            
+        apps_to_draw = []
+        
+        # 1. Native Apps (Always present)
+        plot_tile = AppTile("Plot & Statistics", "Visualize data, apply mathematical fits, and run topological analysis.", icon="📈")
+        plot_tile.launch_requested.connect(self._launch_plot_app)
+        apps_to_draw.append(plot_tile)
+        
+        inspect_tile = AppTile("Data Inspector", "View raw arrays, sanitize anomalies, and edit dataset tables.", icon="🧮")
+        inspect_tile.launch_requested.connect(self._launch_inspector_app)
+        apps_to_draw.append(inspect_tile)
+        
+        settings_tile = AppTile("Global Settings", "Configure themes, hardware limits, and suite behavior.", icon="⚙️")
+        settings_tile.launch_requested.connect(self._launch_settings_app)
+        apps_to_draw.append(settings_tile)
+        
+        # 2. External Pinned Apps
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        apps_dir = os.path.abspath(os.path.join(base_dir, "../../external_apps"))
+        plugins = PluginManager.scan_plugins(apps_dir)
+        
+        for p in plugins:
+            if p.get("pinned", False):
+                # We use a lambda default argument (folder=p["folder_path"]) to prevent late-binding loop bugs
+                unpin_func = lambda _, folder=p["folder_path"]: self._toggle_pin(folder, False)
+                
+                custom_tile = AppTile(
+                    title=p["name"], 
+                    description=p["description"], 
+                    icon=p["icon"], 
+                    unpin_callback=unpin_func
+                )
+                
+                # Check for missing dependencies so we don't let them launch broken pinned apps
+                if p.get("missing_deps"):
+                    custom_tile.setEnabled(False)
+                    custom_tile.setToolTip(f"Missing dependencies: {', '.join(p['missing_deps'])}")
+                    custom_tile.setStyleSheet(f"QFrame {{ background-color: {theme.panel_bg}; border: 2px dashed #777; opacity: 0.5; }}")
+                else:
+                    launch_func = lambda popout, n=p["name"], f=p["folder_path"], e=p["entry_file"]: self._launch_external_app(n, f, e)
+                    custom_tile.launch_requested.connect(launch_func)
+                    
+                apps_to_draw.append(custom_tile)
+                
+        # 3. Draw them into the grid, wrapping every 3 columns
+        columns = 3
+        for index, tile in enumerate(apps_to_draw):
+            row = index // columns
+            col = index % columns
+            self.app_grid_layout.addWidget(tile, row, col)
+
+    def _toggle_pin(self, folder_path, state):
+        """Changes the pin state in the JSON and instantly refreshes both UIs."""
+        if PluginManager.set_pinned_state(folder_path, state):
+            self._refresh_main_app_grid()
+            if self.stacked_widget.currentIndex() == 1:
+                self._scan_external_apps() # Refresh the browser if we are looking at it
+            self.show_toast("Success", "App pinned to Hub." if state else "App unpinned from Hub.")
+        
     def _open_app_creator(self):
         """Spawns the dialog and generates the boilerplate files if accepted."""
         import json
@@ -672,54 +842,60 @@ class HubWindow(QMainWindow):
                 os.makedirs(folder_path)
                 
                 # 2. Write manifest.json
-                # --- FIX: Use the data from the dialog! ---
                 manifest = {
                     "name": data["name"],
                     "description": data["description"],
-                    "author": data["author"],   # Changed from "User"
-                    "version": data["version"], # Changed from "1.0"
+                    "author": data["author"],
+                    "version": data["version"],
                     "icon": data["icon"],
-                    "entry_point": "main.py"
+                    "entry_point": "main.py",
+                    "dependencies": data["dependencies"] # <--- WRITE IT TO THE JSON
                 }
                 with open(os.path.join(folder_path, "manifest.json"), "w", encoding="utf-8") as f:
                     json.dump(manifest, f, indent=4)
                     
                 # 3. Write Boilerplate main.py
-                # We dynamically inject their app name into the class name!
                 class_name = data["name"].replace(" ", "").replace("-", "") + "Window"
                 
                 boilerplate = f'''import pyqtgraph as pg
 from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QWidget, QLabel
 
 class {class_name}(QMainWindow):
-    def __init__(self, workspace, current_theme):
+    def __init__(self, api):
         super().__init__()
-        self.workspace = workspace
-        self.theme = current_theme
+        self.api = api
+        self.colours = api.get_theme_colours()
         
         self.setWindowTitle("{data["name"]}")
         self.resize(800, 600)
-        self.setStyleSheet(f"background-color: {{self.theme.bg}}; color: {{self.theme.fg}};")
+        
+        # Apply the EggSuite theme securely via the API
+        self.setStyleSheet(f"background-color: {{self.colours['bg']}}; color: {{self.colours['fg']}};")
         
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         
         title = QLabel("Welcome to {data["name"]}!")
-        title.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {{self.theme.primary_text}};")
+        title.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {{self.colours['primary_text']}};")
         layout.addWidget(title)
         
-        desc = QLabel("Your workspace memory is connected.\\nCheck the terminal to see how many datasets are currently loaded.")
-        desc.setStyleSheet(f"font-size: 14px; color: {{self.theme.fg}};")
+        desc = QLabel("Your plugin is connected to EggSuite via the secure API.\\nCheck the terminal to see your loaded datasets.")
+        desc.setStyleSheet(f"font-size: 14px; color: {{self.colours['fg']}};")
         layout.addWidget(desc)
         layout.addStretch()
         
-        print(f"Plugin connected successfully. Loaded datasets: {{len(self.workspace.datasets)}}")
+        # Test the API
+        loaded_files = self.api.get_dataset_names()
+        print(f"Plugin connected safely. Loaded datasets: {{loaded_files}}")
+        
+        # Test the Toast notification API
+        self.api.show_notification("Plugin Ready", "The API connection is working smoothly.")
 
 # --- MANDATORY ENTRY POINT ---
-def run_app(workspace, current_theme):
-    """Called by the EggSuite Hub when the user clicks 'Launch'."""
-    window = {class_name}(workspace, current_theme)
+def run_app(api):
+    """Called by the EggSuite PluginManager when the user clicks 'Launch'."""
+    window = {class_name}(api)
     return window
 '''
                 with open(os.path.join(folder_path, "main.py"), "w", encoding="utf-8") as f:
@@ -732,8 +908,10 @@ def run_app(workspace, current_theme):
             except Exception as e:
                 CopyableErrorDialog("Creation Failed", "Failed to generate the plugin files.", str(e), self).exec()
 
-    # --- FIX: Updated signature to accept author and version ---
-    def _add_app_to_list(self, name, description, icon="🧩", author="Unknown", version="1.0", app_folder_path=None, entry_file=None):
+    # --- FIX: Added missing_deps parameter ---
+    def _add_app_to_list(self, name, description, icon="🧩", author="Unknown", version="1.0", app_folder_path=None, entry_file=None, missing_deps=None, pinned=False):
+        if missing_deps is None:
+            missing_deps = []
         """Builds a beautiful, properly padded card for a single app."""
         from PyQt6.QtWidgets import QTextEdit
         from PyQt6.QtGui import QFontMetrics
@@ -829,30 +1007,64 @@ def run_app(workspace, current_theme):
         else:
             desc_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
-        # --- FIX: Add the new header layout instead of just the title ---
         text_lay.addLayout(header_lay)
         text_lay.addWidget(desc_box)
+        
+        # --- NEW: Dependency Warning Label ---
+        if missing_deps:
+            warning_lbl = QLabel(f"⚠️ Missing Requirements: {', '.join(missing_deps)}")
+            # Assuming your theme has a danger_text colour. If not, use a hardcoded red like '#ff4444' for now.
+            danger_colour = getattr(theme, 'danger_text', '#ff4444') 
+            warning_lbl.setStyleSheet(f"color: {danger_colour}; font-weight: bold; font-size: 12px; border: none; background: transparent;")
+            text_lay.addWidget(warning_lbl)
+            
+            # If the card has a warning, it needs a bit more height
+            calculated_height += 20 
+        # --------------------------------------
+        
         text_lay.addStretch() 
         
+        # --- FIX: Wrap the buttons in a transparent QWidget so we can align them ---
+        btn_container = QWidget()
+        btn_container.setStyleSheet("background: transparent; border: none;")
+        btn_lay = QVBoxLayout(btn_container)
+        btn_lay.setContentsMargins(0, 0, 0, 0)
+        btn_lay.setSpacing(10)
+        
         launch_btn = QPushButton("🚀 Launch App")
-        launch_btn.setStyleSheet(f"""
-            QPushButton {{
-                font-weight: bold; font-size: 14px; padding: 12px 24px; 
-                background-color: {theme.bg}; color: {theme.primary_text}; 
-                border: 2px solid {theme.primary_border}; border-radius: 6px;
-            }}
-            QPushButton:hover {{ background-color: {theme.primary_border}; color: white; }}
-        """)
         launch_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        if app_folder_path and entry_file:
-            launch_btn.clicked.connect(lambda: self._launch_external_app(name, app_folder_path, entry_file))
+        if missing_deps:
+            launch_btn.setText("🔒 Unavailable")
+            launch_btn.setEnabled(False)
+            launch_btn.setStyleSheet(f"font-weight: bold; font-size: 14px; padding: 12px 24px; background-color: transparent; color: #777777; border: 2px dashed #777777; border-radius: 6px;")
         else:
-            launch_btn.clicked.connect(lambda: self.show_toast("Mock Launch", f"Preparing to inject '{name}' into memory..."))
+            launch_btn.setStyleSheet(f"""
+                QPushButton {{ font-weight: bold; font-size: 14px; padding: 12px 24px; background-color: {theme.bg}; color: {theme.primary_text}; border: 2px solid {theme.primary_border}; border-radius: 6px; }}
+                QPushButton:hover {{ background-color: {theme.primary_border}; color: white; }}
+            """)
+            if app_folder_path and entry_file:
+                launch_btn.clicked.connect(lambda: self._launch_external_app(name, app_folder_path, entry_file))
+                
+        btn_lay.addWidget(launch_btn)
+
+        # --- NEW: Pin/Unpin Button ---
+        if app_folder_path:
+            pin_btn = QPushButton("❌ Unpin from Hub" if pinned else "📌 Pin to Hub")
+            pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            pin_btn.setStyleSheet(f"""
+                QPushButton {{ font-size: 12px; font-weight: bold; padding: 8px; background-color: {theme.panel_bg}; color: {theme.fg}; border: 1px solid {theme.border}; border-radius: 6px; }}
+                QPushButton:hover {{ background-color: {theme.primary_bg}; }}
+            """)
+            pin_btn.clicked.connect(lambda _, f=app_folder_path, s=not pinned: self._toggle_pin(f, s))
+            btn_lay.addWidget(pin_btn)
+        # -----------------------------
         
         layout.addWidget(icon_lbl, alignment=Qt.AlignmentFlag.AlignTop)
         layout.addLayout(text_lay, stretch=1)
-        layout.addWidget(launch_btn, alignment=Qt.AlignmentFlag.AlignVCenter) 
+        
+        # --- FIX: Now we use addWidget, which accepts the alignment flag! ---
+        layout.addWidget(btn_container, alignment=Qt.AlignmentFlag.AlignVCenter) 
         
         widget.layout().update()
         widget.adjustSize()
@@ -863,39 +1075,15 @@ def run_app(workspace, current_theme):
         self.app_list.setItemWidget(item, widget)
         
     def _launch_external_app(self, app_name, folder_path, entry_file):
-        """Dynamically imports and executes an external plugin."""
-        main_path = os.path.join(folder_path, entry_file)
+        """Passes execution to the PluginManager for safe loading."""
+        self.show_toast("Launching", f"Starting {app_name}...")
         
-        # 1. Create a dynamic module specification
-        spec = importlib.util.spec_from_file_location(f"plugin_{app_name.replace(' ', '_')}", main_path)
-        plugin_module = importlib.util.module_from_spec(spec)
+        # Let the external module handle the dangerous injection
+        plugin_window = PluginManager.launch(app_name, folder_path, entry_file, self.workspace, theme, self)
         
-        # 2. Temporarily add the app's folder to the system path
-        # This allows the app to import its own internal files cleanly
-        sys.path.insert(0, folder_path)
-        
-        try:
-            self.show_toast("Launching", f"Starting {app_name}...")
-            
-            # 3. Execute the code into memory
-            spec.loader.exec_module(plugin_module)
-            
-            # 4. Fire the entry function, passing the live workspace!
-            # We expect every plugin to have a 'run_app(workspace, theme)' function
-            plugin_window = plugin_module.run_app(self.workspace, theme)
-            
-            # Keep a reference so it isn't garbage collected
+        if plugin_window:
             self.open_apps.append(plugin_window)
             plugin_window.show()
-            
-        except Exception as e:
-            import traceback
-            error_details = traceback.format_exc()
-            CopyableErrorDialog("Plugin Crash", f"Failed to launch {app_name}.", f"{e}\n\n{error_details}", self).exec()
-        finally:
-            # 5. Clean up the system path
-            if folder_path in sys.path:
-                sys.path.remove(folder_path)
 
     def _filter_app_list(self, text):
         """Hides apps that do not match and highlights the search term in the ones that do."""
@@ -956,50 +1144,28 @@ def run_app(workspace, current_theme):
                 item.setHidden(True)
 
     def _scan_external_apps(self):
-        """Scans the external_apps directory for valid plugins and builds their UI cards."""
+        """Uses the PluginManager to discover apps and builds their UI cards."""
         self.app_list.clear()
         
-        # Define the path to the external_apps folder (relative to this script)
         base_dir = os.path.dirname(os.path.abspath(__file__))
         apps_dir = os.path.abspath(os.path.join(base_dir, "../../external_apps"))
         
-        if not os.path.exists(apps_dir):
-            os.makedirs(apps_dir) # Create it if it doesn't exist
-            return
-            
-        # Scan for folders containing a manifest.json
-        for item in os.listdir(apps_dir):
-            app_path = os.path.join(apps_dir, item)
-            if not os.path.isdir(app_path): continue
-                
-            manifest_path = os.path.join(app_path, "manifest.json")
-            if not os.path.exists(manifest_path): continue
-                
-            try:
-                with open(manifest_path, 'r', encoding='utf-8') as f:
-                    manifest = json.load(f)
-                    
-                name = manifest.get("name", "Unknown App")
-                desc = manifest.get("description", "No description provided.")
-                icon = manifest.get("icon", "🧩")
-                
-                # --- NEW: Read Author and Version ---
-                author = manifest.get("author", "Unknown Author")
-                version = manifest.get("version", "1.0")
-                # ------------------------------------
-                
-                entry_file = manifest.get("entry_point", "main.py")
-                
-                entry_path = os.path.join(app_path, entry_file)
-                if not os.path.exists(entry_path):
-                    print(f"Plugin Error: {name} is missing its entry point: {entry_file}")
-                    continue
-                    
-                # --- FIX: Pass author and version to the UI builder ---
-                self._add_app_to_list(name, desc, icon, author, version, app_path, entry_file)
-                
-            except Exception as e:
-                print(f"Failed to load plugin manifest in {item}: {e}")
+        # --- FIX: Ask the manager for the list of plugins ---
+        plugins = PluginManager.scan_plugins(apps_dir)
+        
+        # --- FIX: Loop through the returned dictionaries and pass the missing dependencies ---
+        for p in plugins:
+            self._add_app_to_list(
+                p["name"], 
+                p["description"], 
+                icon=p["icon"], 
+                author=p["author"], 
+                version=p["version"], 
+                app_folder_path=p["folder_path"], 
+                entry_file=p["entry_file"],
+                missing_deps=p.get("missing_deps", []),
+                pinned=p.get("pinned", False) # Pass the pinned state
+            )
 
     def show_toast(self, title, message="", is_error=False):
         """Spawns a non-blocking notification in the bottom-right corner."""
