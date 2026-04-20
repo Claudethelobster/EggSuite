@@ -1,0 +1,8 @@
+{
+    "name": "Random Walk Simulator",
+    "description": "A test plugin that generates a 2D random walk to verify external app integration and PyQtGraph rendering.",
+    "author": "EggSuite Dev",
+    "version": "1.0",
+    "icon": "🚶",
+    "entry_point": "main.py"
+}
