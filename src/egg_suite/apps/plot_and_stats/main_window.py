@@ -3256,6 +3256,14 @@ class BadgerLoopQtGraph(QMainWindow):
         self.point_size_edit = QLineEdit("5")
         l3.addRow("Scatter Point Size:", self.point_size_edit)
 
+        # --- NEW: UNIVERSAL ERROR BAR SETTINGS ---
+        self.eb_width_edit = QLineEdit("1.5")
+        l3.addRow("Default Error Bar Width:", self.eb_width_edit)
+        
+        self.eb_cap_edit = QLineEdit("0.0")
+        l3.addRow("Default Error Bar Cap Size:", self.eb_cap_edit)
+        # -----------------------------------------
+
         self.symbol_combo = QComboBox()
         self.symbol_combo.addItems(["Circle (o)", "Square (s)", "Triangle (t)", "Star (star)", "Cross (+)", "X (x)"])
         l3.addRow("Scatter Symbol:", self.symbol_combo)
@@ -3659,6 +3667,12 @@ class BadgerLoopQtGraph(QMainWindow):
         self.xcol.currentIndexChanged.connect(self.update_current_series)
         self.ycol.currentIndexChanged.connect(self.update_current_series)
         self.zcol.currentIndexChanged.connect(self.update_current_series)
+        
+        # --- ADD THESE 3 LINES ---
+        self.xuncert.currentIndexChanged.connect(self.update_current_series)
+        self.yuncert.currentIndexChanged.connect(self.update_current_series)
+        self.zuncert.currentIndexChanged.connect(self.update_current_series)
+        # -------------------------
 
         self.heatmap_cmap_label = QLabel("Heatmap Colormap")
         self.heatmap_cmap_label.setVisible(False)
@@ -4004,10 +4018,15 @@ class BadgerLoopQtGraph(QMainWindow):
             
             entries.append({
                 "base_name": base_name,
-                "sig_key": base_name, # Fits use their base name as the key
+                "sig_key": base_name, 
                 "pen": pen,
                 "symbol": symbol,
-                "brush": brush
+                "brush": brush,
+                "eb_width": getattr(sample.item, 'opts', {}).get('eb_width', 0),
+                "eb_color": getattr(sample.item, 'opts', {}).get('eb_color', 'k'),
+                "eb_cap": getattr(sample.item, 'opts', {}).get('eb_cap', 0),
+                "eb_has_x": getattr(sample.item, 'opts', {}).get('eb_has_x', False), # <-- ADDED
+                "eb_has_y": getattr(sample.item, 'opts', {}).get('eb_has_y', False)  # <-- ADDED
             })
             
         if not entries: return
@@ -5468,11 +5487,24 @@ class BadgerLoopQtGraph(QMainWindow):
         if row >= len(self.series_data[self.plot_mode]): return
         pair = self.series_data[self.plot_mode][row]
         self._is_updating_ui = True
+        
+        # Block signals so we don't trigger a cascade of plots
         self.xcol.blockSignals(True); self.ycol.blockSignals(True); self.zcol.blockSignals(True)
+        self.xuncert.blockSignals(True); self.yuncert.blockSignals(True); self.zuncert.blockSignals(True)
+        
         self.xcol.setCurrentIndex(pair['x'])
         self.ycol.setCurrentIndex(pair['y'])
         if 'z' in pair and self.zcol.count() > pair['z']: self.zcol.setCurrentIndex(pair['z'])
+        
+        # --- ADD THESE 3 LINES (+1 puts the "None" offset back) ---
+        if 'x_err' in pair: self.xuncert.setCurrentIndex(pair['x_err'] + 1)
+        if 'y_err' in pair: self.yuncert.setCurrentIndex(pair['y_err'] + 1)
+        if 'z_err' in pair: self.zuncert.setCurrentIndex(pair['z_err'] + 1)
+        # ----------------------------------------------------------
+        
         self.xcol.blockSignals(False); self.ycol.blockSignals(False); self.zcol.blockSignals(False)
+        self.xuncert.blockSignals(False); self.yuncert.blockSignals(False); self.zuncert.blockSignals(False)
+        
         self._is_updating_ui = False
 
     def load_series_to_ui(self):
@@ -5494,18 +5526,23 @@ class BadgerLoopQtGraph(QMainWindow):
             xidx = max(0, self.xcol.currentIndex())
             yidx = max(0, self.ycol.currentIndex())
             zidx = max(0, self.zcol.currentIndex()) if self.zcol.isVisible() else 0
+            
+            # --- ADD THESE 3 LINES (-1 accounts for the "None" option) ---
+            x_err_idx = max(-1, self.xuncert.currentIndex() - 1)
+            y_err_idx = max(-1, self.yuncert.currentIndex() - 1)
+            z_err_idx = max(-1, self.zuncert.currentIndex() - 1)
+            # -------------------------------------------------------------
 
             x_name = self.dataset.column_names.get(xidx, "X")
             y_name = self.dataset.column_names.get(yidx, "Y")
             z_name = self.dataset.column_names.get(zidx, "Z")
 
-            # --- FIX 3: Update the dictionary cleanly without destroying trace styles! ---
             pair = self.series_data[self.plot_mode][row]
             pair.update({
                 "x": xidx, "y": yidx, "z": zidx,
+                "x_err": x_err_idx, "y_err": y_err_idx, "z_err": z_err_idx, # <--- ADD THIS LINE
                 "x_name": x_name, "y_name": y_name, "z_name": z_name
             })
-            # ---------------------------------------------------------------------------
             
             self.series_list.blockSignals(True)
             item = self.series_list.item(row)
@@ -5522,6 +5559,12 @@ class BadgerLoopQtGraph(QMainWindow):
         xidx = max(0, self.xcol.currentIndex())
         yidx = max(0, self.ycol.currentIndex())
         zidx = max(0, self.zcol.currentIndex()) if self.zcol.isVisible() else 0
+        
+        # --- ADD THESE 3 LINES ---
+        x_err_idx = max(-1, self.xuncert.currentIndex() - 1)
+        y_err_idx = max(-1, self.yuncert.currentIndex() - 1)
+        z_err_idx = max(-1, self.zuncert.currentIndex() - 1)
+        # -------------------------
 
         x_name = self.dataset.column_names.get(xidx, "X")
         y_name = self.dataset.column_names.get(yidx, "Y")
@@ -5529,17 +5572,10 @@ class BadgerLoopQtGraph(QMainWindow):
         
         self.series_data[self.plot_mode].append({
             "x": xidx, "y": yidx, "z": zidx,
+            "x_err": x_err_idx, "y_err": y_err_idx, "z_err": z_err_idx, # <--- ADD THIS LINE
             "x_name": x_name, "y_name": y_name, "z_name": z_name,
             "visible": True, "axis": "L"
         })
-        
-        self.series_list.blockSignals(True)
-        self._create_series_list_item(len(self.series_data[self.plot_mode]) - 1)
-        self.series_list.setCurrentRow(len(self.series_data[self.plot_mode]) - 1)
-        self.series_list.blockSignals(False)
-        
-        if not getattr(self, '_is_updating_ui', False):
-            self.plot()
 
     def remove_series_from_list(self):
         row = self.series_list.currentRow()

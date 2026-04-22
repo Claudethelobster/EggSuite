@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QDi
 from PyQt6.QtGui import QColor, QPainter, QIcon, QAction
 from PyQt6.QtCore import Qt, pyqtSignal
 from ui.theme import theme
+from ui.custom_widgets import ColorButton
 
 # --- Matplotlib Imports ---
 import matplotlib
@@ -109,27 +110,6 @@ def extract_live_styles(item):
 # ==========================================
 # CUSTOM UI WIDGETS
 # ==========================================
-class ColorButton(QPushButton):
-    colorChanged = pyqtSignal(QColor)
-    def __init__(self, color=None, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(26, 26)
-        self._color = color if color else QColor(255, 255, 255)
-        self.clicked.connect(self.pick_color)
-        self.update_style()
-        
-    def pick_color(self):
-        c = QColorDialog.getColor(self._color, self, "Select Color")
-        if c.isValid():
-            self._color = c
-            self.update_style()
-            self.colorChanged.emit(c)
-            
-    def update_style(self):
-        self.setStyleSheet(f"background-color: {self._color.name()}; border: 1px solid #777; border-radius: 4px;")
-        
-    def get_color(self):
-        return self._color
 
 
 class CustomFigureOptionsDialog(QDialog):
@@ -140,7 +120,10 @@ class CustomFigureOptionsDialog(QDialog):
         self.setWindowTitle("Figure Options")
         self.setMinimumWidth(380)
         
-        self.lines = [line for line in self.ax.get_lines() if line.get_label() and not line.get_label().startswith('_')]
+        # --- FIX: Extract logical handles from the legend, not the raw lines! ---
+        handles, labels = self.ax.get_legend_handles_labels()
+        self.lines = handles 
+        # ------------------------------------------------------------------------
         
         self.ls_map = {'Solid': '-', 'Dashed': '--', 'DashDot': '-.', 'Dotted': ':', 'None': 'None'}
         self.ls_map_inv = {v: k for k, v in self.ls_map.items()}
@@ -240,39 +223,49 @@ class CustomFigureOptionsDialog(QDialog):
 
     def _load_curve_data(self, idx):
         if idx < 0 or idx >= len(self.lines): return
-        line = self.lines[idx]
+        handle = self.lines[idx]
         
-        self.curve_label_edit.setText(line.get_label())
-        self.line_style_combo.setCurrentText(self.ls_map_inv.get(line.get_linestyle(), 'Solid'))
-        self.line_width_spin.setValue(line.get_linewidth())
-        self.line_color_btn._color = mpl_color_to_qcolor(line.get_color())
+        # --- FIX: Extract the main line if it is trapped inside an ErrorbarContainer ---
+        is_container = hasattr(handle, 'lines')
+        main_line = handle.lines[0] if is_container else handle
+        # -------------------------------------------------------------------------------
+        
+        self.curve_label_edit.setText(handle.get_label())
+        self.line_style_combo.setCurrentText(self.ls_map_inv.get(main_line.get_linestyle(), 'Solid'))
+        self.line_width_spin.setValue(main_line.get_linewidth())
+        self.line_color_btn._color = mpl_color_to_qcolor(main_line.get_color())
         self.line_color_btn.update_style()
         
-        self.marker_style_combo.setCurrentText(self.marker_map_inv.get(line.get_marker(), 'None'))
-        self.marker_size_spin.setValue(line.get_markersize())
-        self.marker_face_btn._color = mpl_color_to_qcolor(line.get_markerfacecolor())
+        self.marker_style_combo.setCurrentText(self.marker_map_inv.get(main_line.get_marker(), 'None'))
+        self.marker_size_spin.setValue(main_line.get_markersize())
+        self.marker_face_btn._color = mpl_color_to_qcolor(main_line.get_markerfacecolor())
         self.marker_face_btn.update_style()
-        self.marker_edge_btn._color = mpl_color_to_qcolor(line.get_markeredgecolor())
+        self.marker_edge_btn._color = mpl_color_to_qcolor(main_line.get_markeredgecolor())
         self.marker_edge_btn.update_style()
 
     def _save_current_curve(self):
         idx = self.curve_combo.currentIndex()
         if idx < 0 or idx >= len(self.lines): return
-        line = self.lines[idx]
+        handle = self.lines[idx]
+        
+        # --- FIX: Target the main line inside the container ---
+        is_container = hasattr(handle, 'lines')
+        main_line = handle.lines[0] if is_container else handle
+        # ------------------------------------------------------
         
         # Update curve label in combo box cleanly
         new_label = self.curve_label_edit.text()
-        line.set_label(new_label)
+        handle.set_label(new_label)
         self.curve_combo.setItemText(idx, new_label)
         
-        line.set_linestyle(self.ls_map[self.line_style_combo.currentText()])
-        line.set_linewidth(self.line_width_spin.value())
-        line.set_color(qcolor_to_mpl_rgba(self.line_color_btn.get_color()))
+        main_line.set_linestyle(self.ls_map[self.line_style_combo.currentText()])
+        main_line.set_linewidth(self.line_width_spin.value())
+        main_line.set_color(qcolor_to_mpl_rgba(self.line_color_btn.get_color()))
         
-        line.set_marker(self.marker_map[self.marker_style_combo.currentText()])
-        line.set_markersize(self.marker_size_spin.value())
-        line.set_markerfacecolor(qcolor_to_mpl_rgba(self.marker_face_btn.get_color()))
-        line.set_markeredgecolor(qcolor_to_mpl_rgba(self.marker_edge_btn.get_color()))
+        main_line.set_marker(self.marker_map[self.marker_style_combo.currentText()])
+        main_line.set_markersize(self.marker_size_spin.value())
+        main_line.set_markerfacecolor(qcolor_to_mpl_rgba(self.marker_face_btn.get_color()))
+        main_line.set_markeredgecolor(qcolor_to_mpl_rgba(self.marker_edge_btn.get_color()))
 
     def apply_changes(self):
         try: self.ax.set_xlim([float(self.xmin_edit.text()), float(self.xmax_edit.text())])
@@ -432,27 +425,39 @@ class MatplotlibPopout(QMainWindow):
 
     def _rebuild_legend_securely(self):
         """Builds the legend while strictly enforcing dark mode and custom marker sizes."""
-        if not self.ax.get_lines(): return
+        if not self.ax.get_lines() and not self.ax.containers: return
         
         bg_color = theme.panel_bg if self.is_dark_mode else "#ffffff"
         fg_color = theme.fg if self.is_dark_mode else "#000000"
         grid_color = "#444444" if self.is_dark_mode else "#cccccc"
         
-        # Check if we actually have labeled lines
-        has_labels = any(l.get_label() and not l.get_label().startswith('_') for l in self.ax.get_lines())
-        if not has_labels: return
+        # Pull exact handles safely from Matplotlib's native generator
+        handles, labels = self.ax.get_legend_handles_labels()
+        if not handles: return
         
-        legend = self.ax.legend(facecolor=bg_color, edgecolor=grid_color)
+        legend = self.ax.legend(handles, labels, facecolor=bg_color, edgecolor=grid_color)
         for text in legend.get_texts():
             text.set_color(fg_color)
             
-        # Brute-force the legend marker sizes to perfectly match the canvas!
-        handles = getattr(legend, 'legend_handles', getattr(legend, 'legendHandles', []))
-        for handle, original_line in zip(handles, self.ax.get_lines()):
-            if hasattr(handle, 'set_markersize'):
-                handle.set_markersize(original_line.get_markersize())
-            if hasattr(handle, 'set_linewidth'):
-                handle.set_linewidth(original_line.get_linewidth())
+        import matplotlib
+        leg_handles = getattr(legend, 'legend_handles', getattr(legend, 'legendHandles', []))
+        
+        # Safely enforce marker sizes by checking object types
+        for orig_handle, leg_handle in zip(handles, leg_handles):
+            try:
+                if isinstance(orig_handle, matplotlib.container.ErrorbarContainer):
+                    main_line = orig_handle.lines[0] # Extract the main plot line from the container
+                    if hasattr(leg_handle, 'lines'):
+                        leg_line = leg_handle.lines[0]
+                        leg_line.set_markersize(main_line.get_markersize())
+                        leg_line.set_linewidth(main_line.get_linewidth())
+                elif isinstance(orig_handle, matplotlib.lines.Line2D):
+                    if hasattr(leg_handle, 'set_markersize'):
+                        leg_handle.set_markersize(orig_handle.get_markersize())
+                    if hasattr(leg_handle, 'set_linewidth'):
+                        leg_handle.set_linewidth(orig_handle.get_linewidth())
+            except Exception:
+                pass
 
     def _refresh_plot(self):
         """Clears the axes and completely rebuilds the Matplotlib figure from the Qt canvas."""
@@ -504,6 +509,16 @@ class MatplotlibPopout(QMainWindow):
         xbase = self.main_window._parse_log_base(self.main_window.xbase.text())
         ybase = self.main_window._parse_log_base(self.main_window.ybase.text())
         
+        # --- NEW: BUILD AN ERROR BAR HASH MAP (Collision Proof) ---
+        eb_map = {}
+        for eb in self.main_window.avg_error_pool:
+            if not eb.isVisible(): continue
+            x_data = eb.opts.get('x')
+            if x_data is not None and len(x_data) > 0:
+                sig = (len(x_data), float(x_data[0])) # Include length to prevent collisions
+                eb_map[sig] = eb.opts
+        # ----------------------------------------------------------
+
         mpl_symbols = {'o':'o', 's':'s', 't':'^', 't1':'^', 't2':'v', 't3':'>', 'd':'d', '+':'+', 'x':'x', 'p':'p', 'h':'h', 'star':'*'}
 
         for item in original_plot.listDataItems():
@@ -524,9 +539,7 @@ class MatplotlibPopout(QMainWindow):
             p_line, sym, sym_size, b_sym, p_sym = extract_live_styles(item)
             
             if p_line.style() == Qt.PenStyle.NoPen:
-                line_color = 'none'
-                width = 0.0
-                linestyle = 'None'
+                line_color, width, linestyle = 'none', 0.0, 'None'
             else:
                 line_color = qcolor_to_mpl_rgba(p_line.color())
                 width = max(1.0, p_line.widthF())
@@ -537,10 +550,34 @@ class MatplotlibPopout(QMainWindow):
             edge_color = 'none' if p_sym.style() == Qt.PenStyle.NoPen else qcolor_to_mpl_rgba(p_sym.color())
 
             name = item_to_name.get(item, getattr(item, 'opts', {}).get('name', None))
-                    
-            self.ax.plot(x, y, color=line_color, linewidth=width, linestyle=linestyle, 
-                         marker=marker, markersize=sym_size, 
-                         markerfacecolor=face_color, markeredgecolor=edge_color, label=name)
+            
+            # --- FIX: UNIFIED RENDERING ENGINE ---
+            x_sig = (len(data[0]), float(data[0][0]))
+            eb_opts = eb_map.get(x_sig)
+            
+            if eb_opts:
+                # We have matching error bars! Let Matplotlib draw the line, symbol, AND errors at once.
+                xerr = eb_opts.get('width') / 2.0 if eb_opts.get('width') is not None else None
+                yerr = eb_opts.get('height') / 2.0 if eb_opts.get('height') is not None else None
+                
+                if xerr is not None and not np.any(xerr > 0): xerr = None
+                if yerr is not None and not np.any(yerr > 0): yerr = None
+                
+                raw_color = eb_opts.get('mpl_ecolor')
+                ecolor = qcolor_to_mpl_rgba(pg.mkColor(raw_color)) if raw_color else line_color
+                elinewidth = eb_opts.get('mpl_elinewidth', width)
+                capsize = eb_opts.get('mpl_capsize', 3.0)
+                
+                self.ax.errorbar(x, y, xerr=xerr, yerr=yerr, color=line_color, linewidth=width, 
+                                 linestyle=linestyle, marker=marker, markersize=sym_size, 
+                                 markerfacecolor=face_color, markeredgecolor=edge_color,
+                                 ecolor=ecolor, elinewidth=elinewidth, capsize=capsize, label=name)
+            else:
+                # Standard trace without error bars
+                self.ax.plot(x, y, color=line_color, linewidth=width, linestyle=linestyle, 
+                             marker=marker, markersize=sym_size, 
+                             markerfacecolor=face_color, markeredgecolor=edge_color, label=name)
+            # -------------------------------------
             
         if xlog: self.ax.set_xscale('log', base=xbase)
         if ylog: self.ax.set_yscale('log', base=ybase)
@@ -551,14 +588,10 @@ class MatplotlibPopout(QMainWindow):
         try: alpha = float(self.main_window.grid_alpha_edit.text())
         except ValueError: alpha = 0.35
         
-        if show_x and show_y:
-            self.ax.grid(True, axis='both', color=grid_color, linestyle='--', alpha=alpha)
-        elif show_x:
-            self.ax.grid(True, axis='x', color=grid_color, linestyle='--', alpha=alpha)
-        elif show_y:
-            self.ax.grid(True, axis='y', color=grid_color, linestyle='--', alpha=alpha)
-        else:
-            self.ax.grid(False)
+        if show_x and show_y: self.ax.grid(True, axis='both', color=grid_color, linestyle='--', alpha=alpha)
+        elif show_x: self.ax.grid(True, axis='x', color=grid_color, linestyle='--', alpha=alpha)
+        elif show_y: self.ax.grid(True, axis='y', color=grid_color, linestyle='--', alpha=alpha)
+        else: self.ax.grid(False)
             
         self._rebuild_legend_securely()
         self.fig.tight_layout()

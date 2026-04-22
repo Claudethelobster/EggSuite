@@ -1,7 +1,7 @@
 # ui/custom_widgets.py
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, pyqtProperty, QPropertyAnimation, QEasingCurve, QTimer, QPoint
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, pyqtProperty, QPropertyAnimation, QEasingCurve, QTimer, QPoint, QPointF
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QComboBox, 
     QPushButton, QHBoxLayout, QSpinBox, QDoubleSpinBox, QColorDialog,
@@ -299,6 +299,40 @@ class DraggableLabel(QLabel):
             self.setCursor(Qt.CursorShape.OpenHandCursor)
         super().mouseReleaseEvent(event)
         
+class CustomItemSample(pg.ItemSample):
+    """A native PyQtGraph subclass that draws error crosses beneath legend symbols."""
+    def __init__(self, item):
+        super().__init__(item)
+        
+    def paint(self, p, *args):
+        opts = getattr(self.item, 'opts', {})
+        eb_width = opts.get('eb_width', 0)
+        
+        if eb_width > 0:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            eb_color = pg.mkColor(opts.get('eb_color', 'k'))
+            p.setPen(pg.mkPen(eb_color, width=eb_width))
+            
+            eb_cap = opts.get('eb_cap', 0)
+            
+            # --- FIX: Only draw the Vertical error bar if Y-Uncertainty exists ---
+            if opts.get('eb_has_y', False):
+                p.drawLine(QPointF(10.0, 2.0), QPointF(10.0, 18.0))
+                if eb_cap > 0:
+                    p.drawLine(QPointF(7.0, 2.0), QPointF(13.0, 2.0))
+                    p.drawLine(QPointF(7.0, 18.0), QPointF(13.0, 18.0))
+                    
+            # --- FIX: Only draw the Horizontal error bar if X-Uncertainty exists ---
+            if opts.get('eb_has_x', False):
+                p.drawLine(QPointF(2.0, 10.0), QPointF(18.0, 10.0))
+                if eb_cap > 0:
+                    p.drawLine(QPointF(2.0, 7.0), QPointF(2.0, 13.0))
+                    p.drawLine(QPointF(18.0, 7.0), QPointF(18.0, 13.0))
+                
+        # Draw the standard line and symbol ON TOP
+        super().paint(p, *args)
+
+
 class CustomLegendItem(pg.LegendItem):
     sigDoubleClicked = pyqtSignal(object)
 
@@ -315,6 +349,16 @@ class CustomLegendItem(pg.LegendItem):
             ev.accept()
         else:
             super().mouseDoubleClickEvent(ev)
+
+    def addItem(self, item, name):
+        """Bypass the default item generator to inject our custom error-bar painter."""
+        label = pg.LabelItem(name)
+        sample = CustomItemSample(item) # <--- Using the new subclass!
+        
+        self.items.append((sample, label))
+        self.layout.addItem(sample, len(self.items)-1, 0)
+        self.layout.addItem(label, len(self.items)-1, 1)
+        self.updateSize()
 
     def update_style(self, bg_col, fg_col, opacity, border_width, columns, spacing):
         base_color = pg.mkColor('w') if bg_col == "Transparent" else pg.mkColor(bg_col)
@@ -340,13 +384,34 @@ class CustomLegendItem(pg.LegendItem):
                 self.layout.addItem(sample, row, col * 2)
                 self.layout.addItem(label, row, col * 2 + 1)
                 
-                # PyQt6 Update: AlignmentFlag
                 self.layout.setAlignment(sample, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.layout.setAlignment(label, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self.layout.setVerticalSpacing(spacing)
         self.layout.setHorizontalSpacing(15) 
         self.updateSize()
+        
+class ColorButton(QPushButton):
+    colorChanged = pyqtSignal(QColor)
+    def __init__(self, color=None, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(26, 26)
+        self._color = color if color else QColor(255, 255, 255)
+        self.clicked.connect(self.pick_color)
+        self.update_style()
+        
+    def pick_color(self):
+        c = QColorDialog.getColor(self._color, self, "Select Color")
+        if c.isValid():
+            self._color = c
+            self.update_style()
+            self.colorChanged.emit(c)
+            
+    def update_style(self):
+        self.setStyleSheet(f"background-color: {self._color.name()}; border: 1px solid #777; border-radius: 4px;")
+        
+    def get_color(self):
+        return self._color
         
 class TraceSettingsDialog(QDialog):
     def __init__(self, style_data, pair_name, parent=None):
@@ -396,6 +461,25 @@ class TraceSettingsDialog(QDialog):
         self.sym_size_spin.setRange(1, 30)
         self.sym_size_spin.setValue(self.style_data.get("symbol_size", 5))
         form.addRow("Symbol Size:", self.sym_size_spin)
+        
+        # --- NEW: ERROR BAR SETTINGS ---
+        form.addRow(QLabel("<b>Error Bars</b>"), QWidget())
+        
+        self.eb_color_btn = ColorButton(QColor(self.style_data.get("eb_color", "#ff0000")))
+        form.addRow("Color:", self.eb_color_btn)
+        
+        self.eb_width_spin = QDoubleSpinBox()
+        self.eb_width_spin.setRange(0.5, 10.0)
+        self.eb_width_spin.setSingleStep(0.5)
+        self.eb_width_spin.setValue(self.style_data.get("eb_width", 1.5))
+        form.addRow("Line Width:", self.eb_width_spin)
+        
+        self.eb_cap_spin = QDoubleSpinBox()
+        self.eb_cap_spin.setRange(0.0, 20.0)
+        self.eb_cap_spin.setSingleStep(0.5)
+        self.eb_cap_spin.setValue(self.style_data.get("eb_cap", 0.0))
+        form.addRow("Cap Size:", self.eb_cap_spin)
+        # -------------------------------
         
         layout.addLayout(form)
         
@@ -448,7 +532,10 @@ class TraceSettingsDialog(QDialog):
             "line_style": self.line_style_combo.currentText(),
             "line_width": self.line_width_spin.value(),
             "symbol": self.sym_combo.currentText(),
-            "symbol_size": self.sym_size_spin.value()
+            "symbol_size": self.sym_size_spin.value(),
+            "eb_color": self.eb_color_btn.get_color().name(), # <-- ADDED
+            "eb_width": self.eb_width_spin.value(),           # <-- ADDED
+            "eb_cap": self.eb_cap_spin.value()                # <-- ADDED
         })
         return self.style_data
 
@@ -605,6 +692,18 @@ class LegendCustomizationDialog(QDialog):
             html_text = re.sub(r'_([\w\.\-]+)', r'<sub>\1</sub>', html_text)
             
             dummy_plot = pg.PlotDataItem(pen=entry.get("pen", 'k'), symbol=entry.get("symbol", None), symbolBrush=entry.get("brush", None))
+            
+            # --- FIX: Inject error bars into the live preview ---
+            if entry.get("eb_width", 0) > 0:
+                dummy_plot.opts.update({
+                    "eb_width": entry.get("eb_width"),
+                    "eb_color": entry.get("eb_color"),
+                    "eb_cap": entry.get("eb_cap"),
+                    "eb_has_x": entry.get("eb_has_x", False), # <-- ADDED
+                    "eb_has_y": entry.get("eb_has_y", False)  # <-- ADDED
+                })
+            # ----------------------------------------------------
+                
             self.preview_legend.addItem(dummy_plot, html_text)
             
     def get_result(self):

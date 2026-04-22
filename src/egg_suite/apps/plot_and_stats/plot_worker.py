@@ -1,4 +1,4 @@
-# core/plot_worker.py
+# apps/plot_and_stats/plot_worker.py
 import time
 import traceback
 import numpy as np
@@ -75,6 +75,18 @@ class PlotWorkerThread(QThread):
                         x_name_out = pair.get("x_name", "X")
                         y_name_out = pair.get("y_name", "Y")
 
+                        # --- FIX 1: EXTRACT UNCERTAINTY DATA ---
+                        if p.get("csv_uncerts_enabled", False):
+                            arr_ref = self.dataset.data if is_csv else self.dataset.sweeps[sw].data
+                            if points != -1: arr_ref = arr_ref[points]
+                            
+                            xe_idx, ye_idx = pair.get("x_err", -1), pair.get("y_err", -1)
+                            dx = np.asarray(arr_ref[:, xe_idx], dtype=np.float64) if xe_idx >= 0 else np.zeros_like(x)
+                            dy = np.asarray(arr_ref[:, ye_idx], dtype=np.float64) if ye_idx >= 0 else np.zeros_like(y)
+                        else:
+                            dx, dy = np.zeros_like(x), np.zeros_like(y)
+                        # ---------------------------------------
+
                         # =======================================================
                         # FFT MODE LOGIC - Done BEFORE Log Scaling!
                         # =======================================================
@@ -117,6 +129,7 @@ class PlotWorkerThread(QThread):
                                 
                         valid = np.isfinite(x) & np.isfinite(y)
                         x, y = x[valid], y[valid]
+                        dx, dy = dx[valid], dy[valid]
                         
                         if len(x) == 0: continue
                         
@@ -148,11 +161,14 @@ class PlotWorkerThread(QThread):
                             if len(x) > MAX_POINTS:
                                 stride = max(1, len(x) // MAX_POINTS)
                                 x, y = x[::stride], y[::stride]
+                                dx, dy = dx[::stride], dy[::stride] # <--- ADD THIS
                                 
                             pkg.update({
                                 "type": "standard", 
                                 "x": np.ascontiguousarray(x, dtype=np.float64), 
-                                "y": np.ascontiguousarray(y, dtype=np.float64)
+                                "y": np.ascontiguousarray(y, dtype=np.float64),
+                                "dx": np.ascontiguousarray(dx, dtype=np.float64), # <--- ADD THIS
+                                "dy": np.ascontiguousarray(dy, dtype=np.float64)  # <--- ADD THIS
                             })
                             packages.append(pkg)
                             

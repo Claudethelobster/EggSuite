@@ -1,4 +1,4 @@
-# ui/renderers/renderer_2d.py
+# apps/plot_and_stats/renderers/renderer_2d.py
 import numpy as np
 import pyqtgraph as pg
 import matplotlib
@@ -248,9 +248,33 @@ class Renderer2D:
                     
                 trace_pen = pg.mkPen(line_color, width=line_thick, style=pen_style)
                 
+                # ========================================================
+                # UNIFIED ERROR BAR OPTIONS EXTRACTION
+                # ========================================================
+                has_x_err = "dx" in pkg and np.any(pkg["dx"] > 0)
+                has_y_err = "dy" in pkg and np.any(pkg["dy"] > 0)
+                has_errors = has_x_err or has_y_err
+                
+                # CRITICAL: We MUST provide a baseline dictionary with width=0
+                # to wipe the previous state from memory when the toggle is turned off!
+                eb_opts = {
+                    'eb_width': 0.0, 
+                    'eb_has_x': False, 
+                    'eb_has_y': False
+                }
+                
+                if has_errors:
+                    eb_opts['eb_has_x'] = has_x_err
+                    eb_opts['eb_has_y'] = has_y_err
+                    eb_opts['eb_color'] = style.get("eb_color", line_color)
+                    try: eb_opts['eb_width'] = float(style.get("eb_width", mw.eb_width_edit.text() if hasattr(mw, 'eb_width_edit') and mw.eb_width_edit.text() else 1.5))
+                    except: eb_opts['eb_width'] = 1.5
+                    try: eb_opts['eb_cap'] = float(style.get("eb_cap", mw.eb_cap_edit.text() if hasattr(mw, 'eb_cap_edit') and mw.eb_cap_edit.text() else 3.0))
+                    except: eb_opts['eb_cap'] = 3.0
+                # ========================================================
+                
                 # --- SMART AUTO-NAMING ENGINE ---
                 base_name = y_name
-                
                 if num_active_pairs > 1:
                     base_name = f"[P{pair_idx+1}] {base_name}"
                     
@@ -289,7 +313,10 @@ class Renderer2D:
                             mw._prompt_legend_rename(key, current)
                             ev.accept()
                     label_item.mouseClickEvent = on_click
-                
+
+                # ========================================================
+                # TRACE RENDERING
+                # ========================================================
                 if pkg["type"] == "average":
                     if scatter_idx >= len(mw.scatter_pool):
                         s = pg.ScatterPlotItem(pxMode=True)
@@ -302,6 +329,7 @@ class Renderer2D:
                                     y=np.array([pkg["y_mean"]], dtype=np.float64), 
                                     size=pt_size + 3, pen=pg.mkPen(None), brush=pg.mkBrush(line_color), symbol=sym)
                     scatter.setVisible(True)
+                    scatter.opts.update(eb_opts) # <--- Inject Error Bar styling!
                     
                     if show_legend:
                         if sig_key not in added_to_legend:
@@ -309,23 +337,43 @@ class Renderer2D:
                             added_to_legend.add(sig_key)
                             sample, label_item = mw.legend.items[-1]
                             bind_double_click(label_item, sig_key, legend_name)
-                        
+                            
                     scatter_idx += 1
                     
-                    if "dx" in pkg and "dy" in pkg:
+                    # Render Averaged Error Bars
+                    if has_errors:
                         if err_idx >= len(mw.avg_error_pool):
                             eb = pg.ErrorBarItem()
                             mw.avg_error_pool.append(eb)
                             
                         err_item = mw.avg_error_pool[err_idx]
                         target_vb.addItem(err_item)
-                        err_item.setData(x=np.array([pkg["x_mean"]]), y=np.array([pkg["y_mean"]]), 
-                                         width=np.array([2*pkg["dx"]]), height=np.array([2*pkg["dy"]]), 
-                                         pen=pg.mkPen(line_color, width=2))
+                        
+                        try: mult = float(mw.errorbar_sigma_edit.text()) if mw.errorbar_sigma_edit.isVisible() else 1.0
+                        except: mult = 1.0
+                        
+                        eb_color = eb_opts.get("eb_color", line_color)
+                        eb_width = eb_opts.get("eb_width", 1.5)
+                        eb_cap = eb_opts.get("eb_cap", 3.0)
+                        
+                        x_pts = np.array([pkg["x_mean"]])
+                        x_span = max(1e-10, np.nanmax(x_pts) - np.nanmin(x_pts)) if len(x_pts) > 1 else 1.0
+                        pyqt_beam = eb_cap * (x_span / 800.0)
+                        
+                        err_item.setData(
+                            x=x_pts, y=np.array([pkg["y_mean"]]), 
+                            width=np.array([2*pkg["dx"]]) * mult, height=np.array([2*pkg["dy"]]) * mult, 
+                            pen=pg.mkPen(eb_color, width=eb_width),
+                            beam=pyqt_beam 
+                        )
+                        err_item.opts['mpl_capsize'] = eb_cap 
+                        err_item.opts['mpl_ecolor'] = eb_color
+                        err_item.opts['mpl_elinewidth'] = eb_width
                         err_item.setVisible(True)
                         err_idx += 1
-                    
+                        
                 elif pkg["type"] == "standard":
+                    # 1. Line Rendering
                     if "Line" in trace_type or trace_type == "FFT (Spectrum)":
                         if curve_idx >= len(mw.curve_pool):
                             c = pg.PlotCurveItem(connect="finite", autoDownsample=True)
@@ -335,17 +383,21 @@ class Renderer2D:
                         target_vb.addItem(curve)
                         curve.setData(pkg["x"], pkg["y"], pen=trace_pen) 
                         curve.setVisible(True)
+                        curve.opts.update(eb_opts) # <--- Inject Error Bar styling!
                         
                         if show_legend and "Scatter" not in trace_type:
                             if sig_key not in added_to_legend:
                                 if getattr(mw, 'group_sweeps_legend', False) or len(added_to_legend) < 50:
-                                    mw.legend.addItem(curve, html_name)
+                                    proxy = pg.PlotDataItem(pen=trace_pen, symbol=sym, symbolBrush=pg.mkBrush(line_color), symbolSize=pt_size)
+                                    proxy.opts.update(eb_opts) # <--- Inject Error Bar styling!
+                                    mw.legend.addItem(proxy, html_name)
                                     added_to_legend.add(sig_key)
                                     sample, label_item = mw.legend.items[-1]
                                     bind_double_click(label_item, sig_key, legend_name)
                                 
                         curve_idx += 1
-                        
+
+                    # 2. Scatter Rendering
                     if "Scatter" in trace_type:
                         if scatter_idx >= len(mw.scatter_pool):
                             s = pg.ScatterPlotItem(pxMode=True)
@@ -358,12 +410,14 @@ class Renderer2D:
                         valid = np.isfinite(x_pts) & np.isfinite(y_pts)
                         scatter.setData(x=x_pts[valid], y=y_pts[valid], size=pt_size, pen=pg.mkPen(None), brush=pg.mkBrush(line_color), symbol=sym)
                         scatter.setVisible(True) 
+                        scatter.opts.update(eb_opts) # <--- Inject Error Bar styling!
                         
                         if show_legend:
                             if sig_key not in added_to_legend:
                                 if getattr(mw, 'group_sweeps_legend', False) or len(added_to_legend) < 50:
                                     if "Line" in trace_type:
                                         proxy = pg.PlotDataItem(pen=trace_pen, symbol=sym, symbolBrush=pg.mkBrush(line_color), symbolSize=pt_size)
+                                        proxy.opts.update(eb_opts) # <--- Inject Error Bar styling!
                                         mw.legend.addItem(proxy, html_name)
                                     else:
                                         mw.legend.addItem(scatter, html_name)
@@ -373,6 +427,38 @@ class Renderer2D:
                                     bind_double_click(label_item, sig_key, legend_name)
                                 
                         scatter_idx += 1
+
+                    # 3. Standard Error Bar Rendering
+                    if has_errors:
+                        if err_idx >= len(mw.avg_error_pool):
+                            eb = pg.ErrorBarItem()
+                            mw.avg_error_pool.append(eb)
+                            
+                        err_item = mw.avg_error_pool[err_idx]
+                        target_vb.addItem(err_item)
+                        
+                        try: mult = float(mw.errorbar_sigma_edit.text()) if mw.errorbar_sigma_edit.isVisible() else 1.0
+                        except: mult = 1.0
+                        
+                        eb_color = eb_opts.get("eb_color", line_color)
+                        eb_width = eb_opts.get("eb_width", 1.5)
+                        eb_cap = eb_opts.get("eb_cap", 3.0)
+                        
+                        x_pts = pkg["x"]
+                        x_span = max(1e-10, np.nanmax(x_pts) - np.nanmin(x_pts)) if len(x_pts) > 1 else 1.0
+                        pyqt_beam = eb_cap * (x_span / 800.0)
+                        
+                        err_item.setData(
+                            x=x_pts, y=pkg["y"], 
+                            width=2 * pkg["dx"] * mult, height=2 * pkg["dy"] * mult, 
+                            pen=pg.mkPen(eb_color, width=eb_width),
+                            beam=pyqt_beam 
+                        )
+                        err_item.opts['mpl_capsize'] = eb_cap 
+                        err_item.opts['mpl_ecolor'] = eb_color
+                        err_item.opts['mpl_elinewidth'] = eb_width
+                        err_item.setVisible(True)
+                        err_idx += 1
 
             if hasattr(mw, 'active_fits') and mw.active_fits:
                 for fit in mw.active_fits:
