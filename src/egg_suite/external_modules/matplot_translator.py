@@ -538,6 +538,10 @@ class MatplotlibPopout(QMainWindow):
                 
             p_line, sym, sym_size, b_sym, p_sym = extract_live_styles(item)
             
+            # --- FIX: Extract PyQtGraph's Z-order hierarchy ---
+            z_order = item.zValue()
+            # --------------------------------------------------
+            
             if p_line.style() == Qt.PenStyle.NoPen:
                 line_color, width, linestyle = 'none', 0.0, 'None'
             else:
@@ -568,15 +572,19 @@ class MatplotlibPopout(QMainWindow):
                 elinewidth = eb_opts.get('mpl_elinewidth', width)
                 capsize = eb_opts.get('mpl_capsize', 3.0)
                 
+                # --- FIX: Inject zorder ---
                 self.ax.errorbar(x, y, xerr=xerr, yerr=yerr, color=line_color, linewidth=width, 
                                  linestyle=linestyle, marker=marker, markersize=sym_size, 
                                  markerfacecolor=face_color, markeredgecolor=edge_color,
-                                 ecolor=ecolor, elinewidth=elinewidth, capsize=capsize, label=name)
+                                 ecolor=ecolor, elinewidth=elinewidth, capsize=capsize, 
+                                 label=name, zorder=z_order) 
             else:
                 # Standard trace without error bars
+                # --- FIX: Inject zorder ---
                 self.ax.plot(x, y, color=line_color, linewidth=width, linestyle=linestyle, 
                              marker=marker, markersize=sym_size, 
-                             markerfacecolor=face_color, markeredgecolor=edge_color, label=name)
+                             markerfacecolor=face_color, markeredgecolor=edge_color, 
+                             label=name, zorder=z_order) 
             # -------------------------------------
             
         if xlog: self.ax.set_xscale('log', base=xbase)

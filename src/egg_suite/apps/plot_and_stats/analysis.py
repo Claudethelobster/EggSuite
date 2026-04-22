@@ -811,11 +811,19 @@ class PeakFinderTool(QDialog):
         pkg = active_pkgs[0]
         x = pkg['x'] 
         y = pkg['y']
+        
+        # --- FIX: Extract uncertainties (default to 0 if not plotted) ---
+        dx_arr = pkg.get('dx', np.zeros_like(x))
+        dy_arr = pkg.get('dy', np.zeros_like(y))
+        # ----------------------------------------------------------------
+        
         axis_side = pkg.get('axis', 'L')
         
         sort_idx = np.argsort(x)
         x = x[sort_idx]
         y = y[sort_idx]
+        dx_arr = dx_arr[sort_idx] # <-- Sort errors to stay aligned
+        dy_arr = dy_arr[sort_idx] # <-- Sort errors to stay aligned
         
         is_x_log = hasattr(self.parent_gui, 'xscale') and self.parent_gui.xscale.currentText() == "Log"
         try: x_base = float(self.parent_gui.xbase.text())
@@ -867,6 +875,8 @@ class PeakFinderTool(QDialog):
 
         peak_x_vis = []
         peak_y_vis = []
+        peak_dx_list = [] # <-- NEW
+        peak_dy_list = [] # <-- NEW
 
         for i, p in enumerate(peaks):
             if "FWHM" in mode: rel_h = 0.5
@@ -900,8 +910,11 @@ class PeakFinderTool(QDialog):
             left_x_vis.append(lx_v)
             right_x_vis.append(rx_v)
             width_heights.append(w_h[0])
+            
             peak_x_vis.append(float(x[p]))
             peak_y_vis.append(peak_height)
+            peak_dx_list.append(float(dx_arr[p])) # <-- Extract error
+            peak_dy_list.append(float(dy_arr[p])) # <-- Extract error
             
             # Save accurately to memory
             self.peak_data_memory.append({
@@ -946,7 +959,8 @@ class PeakFinderTool(QDialog):
             self.table.setItem(i, 3, item_width)
             self.table.setItem(i, 4, item_tag)
             
-        self.parent_gui.draw_peak_markers(peak_x_vis, peak_y_vis, left_x_vis, right_x_vis, width_heights, axis_side)
+        # --- FIX: Pass the errors down to the drawing function ---
+        self.parent_gui.draw_peak_markers(peak_x_vis, peak_y_vis, peak_dx_list, peak_dy_list, left_x_vis, right_x_vis, width_heights, axis_side)
 
     def run_ifft_filter(self):
         selected_rows = list(set([item.row() for item in self.table.selectedItems()]))

@@ -1496,7 +1496,7 @@ class BadgerLoopQtGraph(QMainWindow):
         self.peak_finder_tool.raise_()
         self.peak_finder_tool.activateWindow()
 
-    def draw_peak_markers(self, peaks_x, peaks_y, left_x, right_x, width_heights, axis_side):
+    def draw_peak_markers(self, peaks_x, peaks_y, peaks_dx, peaks_dy, left_x, right_x, width_heights, axis_side):
         self.clear_peak_markers()
         self.peak_markers = []
         
@@ -1509,40 +1509,49 @@ class BadgerLoopQtGraph(QMainWindow):
         num_peaks = len(peaks_x)
         if num_peaks == 0: return
 
-        # --- NEW: INVERSE SCALING ENGINE ---
+        # Grab the multiplier so the legend text matches the visual error bars
+        try: mult = float(self.errorbar_sigma_edit.text()) if self.errorbar_sigma_edit.isVisible() else 1.0
+        except: mult = 1.0
+
         # Check if the X-axis is currently log-scaled and grab the base
         xlog = self.xscale.currentText() == "Log"
         xbase = self._parse_log_base(self.xbase.text())
         
         def to_raw_x(vis_x):
-            """Translates visual log coordinates back into physical linear values."""
             if not xlog: return vis_x
             with np.errstate(over='ignore', invalid='ignore'):
                 return float(np.power(xbase, vis_x))
-        # -----------------------------------
         
         if num_peaks <= 3:
             # Add each individual peak and bandwidth to the legend
             for i in range(num_peaks):
                 px, py = peaks_x[i], peaks_y[i]
+                dx, dy = peaks_dx[i] * mult, peaks_dy[i] * mult
                 lx, rx, h = left_x[i], right_x[i], width_heights[i]
                 
                 # Un-log the values specifically for the legend text
                 px_raw = to_raw_x(px)
                 w_val_raw = to_raw_x(rx) - to_raw_x(lx)
                 
+                # --- FIX: Format the legend string with ± if errors exist ---
+                x_str = f"{px_raw:.3g} \u00b1 {dx:.3g}" if dx > 0 else f"{px_raw:.3g}"
+                y_str = f"{py:.3g} \u00b1 {dy:.3g}" if dy > 0 else f"{py:.3g}"
+                
                 # 1. The Peak Scatter (Red Circle)
                 scatter = pg.ScatterPlotItem(x=[px], y=[py], size=14, pen=pg.mkPen('k', width=1.5), brush=pg.mkBrush('r'), symbol='o')
+                scatter.setZValue(1000) # <--- FIX: Push to the absolute top
                 target_vb.addItem(scatter)
-                self.peak_markers.append((scatter, target_vb, True, f"Peak {i+1}: ({px_raw:.3g}, {py:.3g})"))
+                self.peak_markers.append((scatter, target_vb, True, f"Peak {i+1}: ({x_str}, {y_str})"))
                 
                 # 2. The Horizontal Bandwidth Line
                 line = pg.PlotCurveItem(x=[lx, rx], y=[h, h], pen=pg.mkPen('r', width=2.5))
+                line.setZValue(999) # <--- Sit just underneath the red dot
                 target_vb.addItem(line)
                 self.peak_markers.append((line, target_vb, True, f"Peak {i+1} Width: {w_val_raw:.3g}"))
                 
                 # 3. Vertical Dashed Drop Lines (Don't add these to legend)
                 vline = pg.InfiniteLine(pos=px, angle=90, pen=pg.mkPen((150, 150, 150, 150), style=Qt.PenStyle.DashLine))
+                vline.setZValue(-10) # <--- Push down to the background layer
                 target_vb.addItem(vline)
                 self.peak_markers.append((vline, target_vb, False, None))
         else:
@@ -1552,6 +1561,7 @@ class BadgerLoopQtGraph(QMainWindow):
             
             # Draw all scatters as one item
             scatter = pg.ScatterPlotItem(x=peaks_x, y=peaks_y, size=14, pen=pg.mkPen('k', width=1.5), brush=pg.mkBrush('r'), symbol='o')
+            scatter.setZValue(1000) # <--- FIX: Push to the absolute top
             target_vb.addItem(scatter)
             self.peak_markers.append((scatter, target_vb, True, f"Detected Peaks (N={num_peaks})"))
             
@@ -1559,12 +1569,14 @@ class BadgerLoopQtGraph(QMainWindow):
             for i in range(num_peaks):
                 lx, rx, h = left_x[i], right_x[i], width_heights[i]
                 line = pg.PlotCurveItem(x=[lx, rx], y=[h, h], pen=pg.mkPen('r', width=2.5))
+                line.setZValue(999) # <--- Sit just underneath the red dot
                 target_vb.addItem(line)
                 
                 add_to_legend = (i == 0) # Only tag the very first line so it shows up exactly once
                 self.peak_markers.append((line, target_vb, add_to_legend, f"Avg Width: {avg_width_raw:.3g}"))
                 
                 vline = pg.InfiniteLine(pos=peaks_x[i], angle=90, pen=pg.mkPen((150, 150, 150, 150), style=Qt.PenStyle.DashLine))
+                vline.setZValue(-10) # <--- Push down to the background layer
                 target_vb.addItem(vline)
                 self.peak_markers.append((vline, target_vb, False, None))
                 
