@@ -1,17 +1,14 @@
 import os
 from PyQt6.QtCore import QObject, pyqtSignal
+from core.history_engine import HistoryTree # <--- ADD IMPORT
 
 class GlobalWorkspace(QObject):
-    # Signals broadcasted to ALL open windows in the suite
-    dataset_added = pyqtSignal(str)      # Fired when a new file or folder is loaded
-    dataset_removed = pyqtSignal(str)    # Fired when a file or folder is closed
-    data_modified = pyqtSignal(str)      # Fired when math generates a new column
+    dataset_added = pyqtSignal(str)      
+    dataset_removed = pyqtSignal(str)    
+    data_modified = pyqtSignal(str)      
 
     def __init__(self):
         super().__init__()
-        # The central memory bank.
-        # Key: Absolute file or folder path
-        # Value: Dictionary containing the dataset, its type, and its hierarchy.
         self.datasets = {}
 
     def add_single_file(self, filepath, dataset):
@@ -21,7 +18,8 @@ class GlobalWorkspace(QObject):
             "name": os.path.basename(filepath),
             "dataset": dataset,
             "parent": None,
-            "children": []
+            "children": [],
+            "history": HistoryTree() # <--- 2. ADD THIS TO THE DICT
         }
         self.dataset_added.emit(filepath)
 
@@ -36,7 +34,8 @@ class GlobalWorkspace(QObject):
             "name": os.path.basename(folderpath),
             "dataset": multi_dataset,
             "parent": None,
-            "children": child_paths
+            "children": child_paths,
+            "history": HistoryTree() # <--- 3. ADD THIS TO THE DICT
         }
         
         # 2. Register all the children so they can be accessed independently

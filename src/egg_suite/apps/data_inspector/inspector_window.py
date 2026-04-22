@@ -10,7 +10,62 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QAction
 from ui.theme import theme
+from ui.custom_widgets import ToastNotification
 from apps.data_inspector.uncertainty_window import UncertaintyCalculatorDialog
+from core.history_engine import EggCommand
+
+class DropNaNCommand(EggCommand):
+    """Encapsulates the Drop NaN logic so it can be safely undone and redone."""
+    def __init__(self, inspector, col_name):
+        super().__init__(f"Drop NaNs in '{col_name}'")
+        self.inspector = inspector
+        self.col_name = col_name
+        self.dataset_path = inspector.current_dataset.filename
+        
+        # Capture the mask and the dropped rows before execution
+        self.mask = self.inspector.df[col_name].isna().to_numpy()
+        self.dropped_rows = self.inspector.df[self.mask].copy()
+        self.dropped_count = len(self.dropped_rows)
+
+    def execute(self):
+        self.inspector.df = self.inspector.df.dropna(subset=[self.col_name]).reset_index(drop=True)
+        self._sync()
+
+    def undo(self):
+        import pandas as pd
+        import numpy as np
+        
+        current_data = self.inspector.df.to_numpy()
+        dropped_data = self.dropped_rows.to_numpy()
+        
+        woven_data = np.empty((len(self.mask), current_data.shape[1]), dtype=object)
+        
+        woven_data[self.mask] = dropped_data
+        woven_data[~self.mask] = current_data
+        
+        # Rebuild the DataFrame and let Pandas automatically fix the data types!
+        self.inspector.df = pd.DataFrame(woven_data, columns=self.inspector.df.columns).infer_objects()
+        self._sync()
+
+    def _sync(self):
+        """A helper method to ensure the disk, RAM, and UI all reflect the current DataFrame."""
+        target_file = self.dataset_path
+        
+        # 1. Update Disk
+        self.inspector.df.to_csv(target_file, index=False, encoding='utf-8-sig')
+        
+        # 2. Update RAM
+        self.inspector.current_dataset.data = self.inspector.df.to_numpy()
+        self.inspector.current_dataset.num_points = len(self.inspector.df)
+        
+        # 3. Update the UI Table
+        self.inspector.table_model.set_dataframe(self.inspector.df)
+        self.inspector.stats_label.setText(f"Rows: {len(self.inspector.df):,} | Columns: {len(self.inspector.df.columns)}")
+        
+        # Refresh the sidebar statistics if a column is currently selected
+        idx = self.inspector.table_view.selectionModel().currentIndex()
+        if idx.isValid():
+            self.inspector._on_column_selected(idx, None)
 
 class PandasTableModel(QAbstractTableModel):
     """ A lightning-fast bridge between a Pandas DataFrame and a PyQt TableView. """
@@ -102,9 +157,27 @@ class DataInspectorWindow(QMainWindow):
                 self.showNormal()
 
     def _build_menubar(self):
-        # QMainWindow has a built-in menu bar!
         menu_bar = self.menuBar()
         menu_bar.setStyleSheet(f"background-color: {theme.panel_bg}; color: {theme.fg}; border-bottom: 1px solid {theme.border};")
+
+        # --- FIX: Elevate to ApplicationShortcut to prevent focus stealing ---
+        self.edit_menu = menu_bar.addMenu("Edit")
+        
+        self.action_undo = QAction("Undo", self)
+        self.action_undo.setShortcut("Ctrl+Z")
+        self.action_undo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # <--- UPDATED
+        self.action_undo.triggered.connect(self._trigger_undo)
+        self.addAction(self.action_undo)
+        
+        self.action_redo = QAction("Redo", self)
+        self.action_redo.setShortcut("Ctrl+Y")
+        self.action_redo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # <--- UPDATED
+        self.action_redo.triggered.connect(self._trigger_redo)
+        self.addAction(self.action_redo)
+        
+        self.edit_menu.addAction(self.action_undo)
+        self.edit_menu.addAction(self.action_redo)
+        # -------------------------------------------------------------------
 
         # Build the 'Calculate' Menu
         self.calc_menu = menu_bar.addMenu("Calculate")
@@ -116,6 +189,30 @@ class DataInspectorWindow(QMainWindow):
         self.action_error_prop.triggered.connect(self._open_uncertainty_calculator)
         
         self.calc_menu.addAction(self.action_error_prop)
+        
+    def _trigger_undo(self):
+        """Safely calls undo on the currently active file's history tree."""
+        if self.current_dataset and self.current_dataset.filename in self.workspace.datasets:
+            try:
+                history = self.workspace.datasets[self.current_dataset.filename]["history"]
+                if history.undo():
+                    self.show_toast("Undo Successful", "The previous action has been reverted.")
+                else:
+                    self.show_toast("History Empty", "There is nothing to undo.", is_error=True)
+            except Exception as e:
+                self.show_toast("Undo Error", str(e), is_error=True)
+
+    def _trigger_redo(self):
+        """Safely calls redo on the currently active file's history tree."""
+        if self.current_dataset and self.current_dataset.filename in self.workspace.datasets:
+            try:
+                history = self.workspace.datasets[self.current_dataset.filename]["history"]
+                if history.redo():
+                    self.show_toast("Redo Successful", "The action has been reapplied.")
+                else:
+                    self.show_toast("Timeline End", "There is nothing to redo.", is_error=True)
+            except Exception as e:
+                self.show_toast("Redo Error", str(e), is_error=True)
 
     def _build_toolbar(self):
         toolbar_layout = QHBoxLayout()
@@ -186,6 +283,15 @@ class DataInspectorWindow(QMainWindow):
         """Returns to the main Hub Dashboard and closes the Inspector."""
         self.home_requested.emit()
         self.close()
+        
+    def show_toast(self, title, message="", is_error=False):
+        """Spawns a non-blocking notification in the bottom-right corner."""
+        if hasattr(self, 'active_toast') and self.active_toast:
+            try: self.active_toast.deleteLater()
+            except: pass
+            
+        self.active_toast = ToastNotification(self, title, message, is_error=is_error)
+        self.active_toast.show_toast()
         
     def _open_uncertainty_calculator(self):
         if not self.current_dataset or self.df.empty:
@@ -294,6 +400,7 @@ class DataInspectorWindow(QMainWindow):
         orig_name = os.path.basename(fname)
         directory = os.path.dirname(fname)
         
+        target_file = fname
         if not orig_name.startswith("MIRROR_"):
             name_only, ext = os.path.splitext(orig_name)
             search_pattern = os.path.join(directory, f"MIRROR_{name_only}*{ext}")
@@ -304,53 +411,42 @@ class DataInspectorWindow(QMainWindow):
             target_file = os.path.join(directory, mirror_name)
             
             QMessageBox.information(self, "Mirror Created", f"To protect original data, a Mirror file has been automatically created:\n{mirror_name}")
-        else:
-            target_file = fname
             
-        # 4. Execute the Pandas Math (Lightning Fast)
-        initial_rows = len(self.df)
-        self.df = self.df.dropna(subset=[col_name]).reset_index(drop=True)
-        dropped_count = initial_rows - len(self.df)
-        
-        # 5. Save the cleaned data directly to the disk
-        # We use standard Pandas export here to ensure a clean CSV structure
-        self.df.to_csv(target_file, index=False, encoding='utf-8-sig')
-        
-        # 6. Update the Hub's Global Memory
-        if target_file != fname:
+            # --- CRITICAL FIX: Save the RAW, unedited data into the mirror file FIRST ---
+            self.df.to_csv(target_file, index=False, encoding='utf-8-sig')
+            
             import copy
-            
-            # Create a deep clone of the dataset so the original remains completely untouched in RAM
             new_dataset = copy.deepcopy(self.current_dataset)
-            new_dataset.data = self.df.to_numpy()
-            new_dataset.num_points = len(self.df)
             new_dataset.filename = target_file
             
-            # Register the new mirror file alongside the original in the Hub
             if hasattr(self.workspace, 'add_single_file'):
                 self.workspace.add_single_file(target_file, new_dataset)
             else:
+                from core.history_engine import HistoryTree
                 self.workspace.datasets[target_file] = {
                     "name": os.path.basename(target_file), "type": "file", 
-                    "parent": None, "children": [], "dataset": new_dataset
+                    "parent": None, "children": [], "dataset": new_dataset,
+                    "history": HistoryTree()
                 }
                 
-            # Point the Inspector to the new clone
             self.current_dataset = new_dataset
             self.workspace_btn.setText(f"Active: {os.path.basename(target_file)} ▾")
             self.workspace.dataset_added.emit(target_file)
             
-        else:
-            # If we are already working on a Mirror file, just update it in place
-            self.current_dataset.data = self.df.to_numpy()
-            self.current_dataset.num_points = len(self.df)
-            
-        # 7. Update the Inspector's UI to reflect the sliced data
-        self.table_model.set_dataframe(self.df)
-        self.stats_label.setText(f"Rows: {len(self.df):,} | Columns: {len(self.df.columns)}")
-        self._on_column_selected(self.table_view.selectionModel().currentIndex(), None) 
+        # 4. DELEGATE TO THE COMMAND ENGINE
+        # We do not manually call self.df.dropna() anymore. 
+        # The command must do it, so it can snapshot the rows being destroyed!
+        command = DropNaNCommand(self, col_name)
         
-        QMessageBox.information(self, "Success", f"Successfully dropped {dropped_count} corrupted rows.")
+        # Prevent adding empty actions to the timeline if there were no NaNs to begin with
+        if command.dropped_count == 0:
+            self.show_toast("No Action Taken", f"No missing values found in '{col_name}'.")
+            return
+            
+        # Execute the command (this automatically drops the rows and syncs the UI)
+        self.workspace.datasets[target_file]["history"].execute_command(command)
+        
+        QMessageBox.information(self, "Success", f"Successfully dropped {command.dropped_count} corrupted rows.")
         
     def _on_column_selected(self, current, previous):
         if not current.isValid() or self.df.empty:
