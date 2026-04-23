@@ -1,4 +1,4 @@
-# ui/main_window.py
+# apps/plot_and_stats/main_window.py
 import os
 import sys
 import json
@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QProgressDialog, QListWidget, QGridLayout, 
     QButtonGroup, QApplication, QDialog, QFormLayout, QTextEdit,
     QCheckBox, QTabWidget, QFontComboBox, QSlider, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSpinBox, QMenu
+    QHeaderView, QSpinBox, QMenu, QTreeWidget, QTreeWidgetItem
 )
 
 # Core imports
@@ -52,6 +52,123 @@ from ui.custom_widgets import ToastNotification
 
 from apps.settings.settings import PreferencesDialog
 from apps.plot_and_stats.analysis_hist import SmartBinningDialog, CDFOverlayDialog, SigmaClippingDialog
+from core.history_engine import EggCommand
+
+class HistoryTreeWindow(QDialog):
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self.main_window = main_window
+        self.setWindowTitle("History Timeline")
+        self.resize(400, 500)
+        layout = QVBoxLayout(self)
+        
+        time_lbl = QLabel("<b>Branching History</b><br>Double-click a node to jump to that timeline.")
+        layout.addWidget(time_lbl)
+        
+        self.tree_widget = QTreeWidget()
+        self.tree_widget.setHeaderHidden(True)
+        self.tree_widget.setStyleSheet(f"QTreeWidget {{ background-color: {theme.bg}; color: {theme.fg}; border: 1px solid {theme.border}; font-size: 12px; }}")
+        self.tree_widget.itemDoubleClicked.connect(self._on_timeline_jump)
+        layout.addWidget(self.tree_widget)
+        
+        self._node_memory_map = {}
+        self._refresh_timeline_ui()
+        
+    def _refresh_timeline_ui(self):
+        self.tree_widget.blockSignals(True)
+        self.tree_widget.clear()
+        self._node_memory_map.clear()
+        
+        if not self.main_window.dataset or self.main_window.dataset.filename not in self.main_window.workspace.datasets:
+            self.tree_widget.blockSignals(False)
+            return
+            
+        history = self.main_window.workspace.datasets[self.main_window.dataset.filename]["history"]
+        
+        def build_branch(node, parent_item):
+            prefix = "🟢 " if node == history.current_node else "⚪ "
+            item = QTreeWidgetItem([f"{prefix}[{node.timestamp}] {node.description}"])
+            
+            if node == history.current_node:
+                f = item.font(0); f.setBold(True); item.setFont(0, f)
+                item.setForeground(0, QColor(theme.primary_text))
+                
+            item.setData(0, Qt.ItemDataRole.UserRole, id(node))
+            self._node_memory_map[id(node)] = node 
+            
+            if parent_item is None:
+                self.tree_widget.addTopLevelItem(item)
+            else:
+                parent_item.addChild(item)
+                
+            for child in node.children:
+                build_branch(child, item)
+            item.setExpanded(True)
+
+        build_branch(history.root, None)
+        self.tree_widget.blockSignals(False)
+
+    def _on_timeline_jump(self, item, column):
+        node_id = item.data(0, Qt.ItemDataRole.UserRole)
+        target_node = self._node_memory_map.get(node_id)
+        if not target_node: return
+        
+        history = self.main_window.workspace.datasets[self.main_window.dataset.filename]["history"]
+        try:
+            history.teleport_to_node(target_node)
+            self.main_window.show_toast("Timeline Changed", f"Jumped to: {target_node.description}")
+            self._refresh_timeline_ui()
+        except Exception as e:
+            self.main_window.show_toast("Time Travel Error", str(e), is_error=True)
+
+class RenameColumnCommand(EggCommand):
+    def __init__(self, mw, col_idx, old_name, new_name):
+        super().__init__(f"Rename '{old_name}' to '{new_name}'")
+        self.mw = mw
+        self.col_idx = col_idx
+        self.old_name = old_name
+        self.new_name = new_name
+
+    def execute(self):
+        self.mw._rewrite_column_name_in_file(self.mw.dataset.filename, self.col_idx, self.new_name)
+        self.mw._trigger_silent_reload()
+
+    def undo(self):
+        self.mw._rewrite_column_name_in_file(self.mw.dataset.filename, self.col_idx, self.old_name)
+        self.mw._trigger_silent_reload()
+
+class DeleteColumnCommand(EggCommand):
+    def __init__(self, mw, col_idx, col_name, col_data):
+        super().__init__(f"Delete Column '{col_name}'")
+        self.mw = mw
+        self.col_idx = col_idx
+        self.col_name = col_name
+        self.col_data = col_data
+
+    def execute(self):
+        self.mw._delete_column_in_file(self.mw.dataset.filename, self.col_idx)
+        self.mw._trigger_silent_reload()
+
+    def undo(self):
+        self.mw._append_column_to_file(self.mw.dataset.filename, self.col_name, self.col_data)
+        self.mw._trigger_silent_reload()
+
+class AppendColumnCommand(EggCommand):
+    def __init__(self, mw, new_name, calculated_blocks, description):
+        super().__init__(description)
+        self.mw = mw
+        self.new_name = new_name
+        self.calculated_blocks = calculated_blocks
+
+    def execute(self):
+        self.mw._append_column_to_file(self.mw.dataset.filename, self.new_name, self.calculated_blocks)
+        new_idx = len(self.mw.dataset.column_names)
+        self.mw._trigger_silent_reload(target_idx=new_idx)
+
+    def undo(self):
+        last_idx = len(self.mw.dataset.column_names) - 1
+        self.mw._delete_column_in_file(self.mw.dataset.filename, last_idx)
+        self.mw._trigger_silent_reload()
        
 
 class BadgerLoopQtGraph(QMainWindow):
@@ -1048,8 +1165,13 @@ class BadgerLoopQtGraph(QMainWindow):
         name_above = f"{target_name} (> {thresh:g})"
         
         try:
-            self._append_column_to_file(self.dataset.filename, name_below, blocks_below)
-            self._append_column_to_file(self.dataset.filename, name_above, blocks_above)
+            cmd1 = AppendColumnCommand(self, name_below, blocks_below, f"Slice (<{thresh:g}) ➔ '{name_below}'")
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(cmd1)
+            cmd2 = AppendColumnCommand(self, name_above, blocks_above, f"Slice (>{thresh:g}) ➔ '{name_above}'")
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(cmd2)
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Success", f"Successfully sliced data at {thresh:g}.\n\nCreated:\n1. {name_below}\n2. {name_above}")
+            return
             
             from PyQt6.QtWidgets import QMessageBox, QProgressDialog, QApplication
             QMessageBox.information(self, "Success", f"Successfully sliced data at {thresh:g}.\n\nCreated:\n1. {name_below}\n2. {name_above}")
@@ -1114,7 +1236,9 @@ class BadgerLoopQtGraph(QMainWindow):
             new_y_name = f"{pair.get('y_name', 'Y')} (Baseline Subtracted)"
             
             try:
-                self._append_column_to_file(self.dataset.filename, new_y_name, [subtracted_data])
+                command = AppendColumnCommand(self, new_y_name, [subtracted_data], f"Baseline Subtraction ➔ '{new_y_name}'")
+                self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
+                return
                 
                 opts = getattr(self, 'last_load_opts', {"type": self.file_type, "delimiter": ",", "has_header": True})
                 self.progress_dialog = QProgressDialog("Refreshing Data...", "Cancel", 0, 100, self)
@@ -1215,8 +1339,10 @@ class BadgerLoopQtGraph(QMainWindow):
             calculated_data_blocks.append(final_y)
 
         try:
-            self._append_column_to_file(self.dataset.filename, name, calculated_data_blocks)
+            command = AppendColumnCommand(self, name, calculated_data_blocks, f"Signal Processing ➔ '{name}'")
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
             QMessageBox.information(self, "Success", f"Column '{name}' created and saved successfully.")
+            return
             
             opts = getattr(self, 'last_load_opts', {"type": self.file_type, "delimiter": ",", "has_header": True})
             self.progress_dialog = QProgressDialog("Refreshing Data...", "Cancel", 0, 100, self)
@@ -1355,7 +1481,18 @@ class BadgerLoopQtGraph(QMainWindow):
             calculated_data_blocks.append(y_calc)
 
         try:
-            self._append_column_to_file(self.dataset.filename, new_name, calculated_data_blocks)
+            command = AppendColumnCommand(self, new_name, calculated_data_blocks, f"Phase Space ➔ '{new_name}'")
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
+            new_col_idx = len(self.dataset.column_names)
+            self.xcol.blockSignals(True); self.ycol.blockSignals(True)
+            self.xcol.setCurrentIndex(state_idx)
+            self.ycol.setCurrentIndex(new_col_idx)
+            self.xcol.blockSignals(False); self.ycol.blockSignals(False)
+            self.set_plot_mode("2D")
+            self.graphtype.setCurrentText("Line")
+            if self.series_data["2D"]: self.update_current_series()
+            else: self.add_series_to_list()
+            return
             opts = getattr(self, 'last_load_opts', {"type": self.file_type, "delimiter": ",", "has_header": True})
             self.progress_dialog = QProgressDialog("Refreshing Data & Plotting Phase Space...", "Cancel", 0, 100, self)
             self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -1604,6 +1741,26 @@ class BadgerLoopQtGraph(QMainWindow):
             menubar.addAction(home_action)
         # ------------------------
     
+        # Edit Menu
+        self.edit_menu = menubar.addMenu("Edit")
+        self.action_undo = QAction("Undo", self)
+        self.action_undo.setShortcut("Ctrl+Z")
+        self.action_undo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.action_undo.triggered.connect(self._trigger_undo)
+        
+        self.action_redo = QAction("Redo", self)
+        self.action_redo.setShortcut("Ctrl+Y")
+        self.action_redo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.action_redo.triggered.connect(self._trigger_redo)
+        
+        self.action_history = QAction("View History Tree...", self)
+        self.action_history.triggered.connect(self._open_history_tree_window)
+        
+        self.edit_menu.addAction(self.action_undo)
+        self.edit_menu.addAction(self.action_redo)
+        self.edit_menu.addSeparator()
+        self.edit_menu.addAction(self.action_history)
+
         # Inspect Menu
         inspect_menu = menubar.addMenu("Inspect")
         self.inspect_table_action = inspect_menu.addAction("Sweep table")
@@ -1755,6 +1912,66 @@ class BadgerLoopQtGraph(QMainWindow):
 
     def show_help(self):
         HelpDialog(self).exec()
+
+    def _trigger_undo(self):
+        if self.dataset and self.dataset.filename in self.workspace.datasets:
+            try:
+                history = self.workspace.datasets[self.dataset.filename]["history"]
+                if history.undo():
+                    self.show_toast("Undo Successful", "The previous action has been reverted.")
+                    if hasattr(self, 'history_window') and self.history_window.isVisible():
+                        self.history_window._refresh_timeline_ui()
+                else:
+                    self.show_toast("History Empty", "There is nothing to undo.", is_error=True)
+            except Exception as e:
+                self.show_toast("Undo Error", str(e), is_error=True)
+
+    def _trigger_redo(self):
+        if self.dataset and self.dataset.filename in self.workspace.datasets:
+            try:
+                history = self.workspace.datasets[self.dataset.filename]["history"]
+                if history.redo():
+                    self.show_toast("Redo Successful", "The action has been reapplied.")
+                    if hasattr(self, 'history_window') and self.history_window.isVisible():
+                        self.history_window._refresh_timeline_ui()
+                else:
+                    self.show_toast("Timeline End", "There is nothing to redo.", is_error=True)
+            except Exception as e:
+                self.show_toast("Redo Error", str(e), is_error=True)
+
+    def _open_history_tree_window(self):
+        if not self.dataset: return
+        self.history_window = HistoryTreeWindow(self)
+        self.history_window.show()
+
+    def _trigger_silent_reload(self, target_idx=None):
+        opts = getattr(self, 'last_load_opts', {"type": self.file_type, "delimiter": ",", "has_header": True})
+        self.progress_dialog = QProgressDialog("Refreshing Data...", "Cancel", 0, 100, self)
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setCancelButton(None)
+        self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.show()
+        QApplication.processEvents()
+        
+        target_file = self.dataset.filename
+        
+        def on_refresh_done(ds):
+            if getattr(self, 'progress_dialog', None) is not None:
+                try: self.progress_dialog.accept()
+                except: pass
+            self._on_load_finished(ds, target_file, opts)
+            if target_idx is not None:
+                self.ycol.setCurrentIndex(target_idx)
+            self.update_current_series()
+            if hasattr(self, 'history_window') and self.history_window.isVisible():
+                self.history_window._refresh_timeline_ui()
+
+        from core.data_loader import DataLoaderThread
+        self.loader_thread = DataLoaderThread(target_file, opts)
+        self.loader_thread.progress.connect(self._update_progress_ui)
+        self.loader_thread.finished.connect(on_refresh_done)
+        self.loader_thread.error.connect(self._on_load_error)
+        self.loader_thread.start()
         
     def _restart_programme(self):
         """ Spawns a fresh instance of the application and brutally kills the current one. """
@@ -1871,7 +2088,9 @@ class BadgerLoopQtGraph(QMainWindow):
         if action == "rename":
             if not new_name: return
             if not self.confirm_permanent_change(f"This will permanently change the column name in the mirror file:\n{os.path.basename(self.dataset.filename)}\n\nAre you sure?"): return
-            self._rewrite_column_name_in_file(self.dataset.filename, col_idx, new_name)
+            command = RenameColumnCommand(self, col_idx, self.dataset.column_names[col_idx], new_name)
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
+            return
             
         elif action == "delete":
             col_name = self.dataset.column_names.get(col_idx, "Unknown")
@@ -1881,7 +2100,16 @@ class BadgerLoopQtGraph(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if ans != QMessageBox.StandardButton.Yes: return
-            self._delete_column_in_file(self.dataset.filename, col_idx)
+            is_csv = (self.file_type in ["CSV", "ConcatenatedCSV"])
+            sweeps = range(self.dataset.num_sweeps) if not is_csv else [0]
+            col_data_blocks = []
+            for sw in sweeps:
+                arr = self.dataset.data if is_csv else self.dataset.sweeps[sw].data
+                col_data_blocks.append(np.asarray(arr[:, col_idx], dtype=np.float64).copy())
+                
+            command = DeleteColumnCommand(self, col_idx, col_name, col_data_blocks)
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
+            return
 
         # Trigger full dataset reload to sync memory, arrays, and UI instantly
         opts = getattr(self, 'last_load_opts', {"type": self.file_type, "delimiter": ",", "has_header": True})
@@ -2215,8 +2443,10 @@ class BadgerLoopQtGraph(QMainWindow):
                     result[~np.isfinite(result)] = np.nan
                     calculated_data_blocks.append(result)
     
-            self._append_column_to_file(self.dataset.filename, new_col_name, calculated_data_blocks)
+            command = AppendColumnCommand(self, new_col_name, calculated_data_blocks, f"Math Equation ➔ '{new_col_name}'")
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
             QMessageBox.information(self, "Success", f"Column '{new_col_name}' created and saved successfully.")
+            return
             
             opts = getattr(self, 'last_load_opts', {"type": self.file_type, "delimiter": ",", "has_header": True})
             self.progress_dialog = QProgressDialog("Refreshing Data...", "Cancel", 0, 100, self)
@@ -3057,7 +3287,11 @@ class BadgerLoopQtGraph(QMainWindow):
             calculated_data_blocks.append(y_calc)
             
         try:
-            self._append_column_to_file(self.dataset.filename, new_name, calculated_data_blocks)
+            command = AppendColumnCommand(self, new_name, calculated_data_blocks, f"Export Fit ➔ '{new_name}'")
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Success", f"Fit exported to column '{new_name}' successfully.")
+            return
             
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.information(self, "Success", f"Fit exported to column '{new_name}' successfully.")
@@ -5731,7 +5965,7 @@ class BadgerLoopQtGraph(QMainWindow):
         
     def _on_plot_error(self, err_msg):
         self._is_plotting = False
-        if hasattr(self, 'progress_dialog'): self.progress_dialog.accept()
+        if getattr(self, 'progress_dialog', None) is not None: self.progress_dialog.accept()
         if "Data is 1-Dimensional" in err_msg: QMessageBox.information(self, "Heatmap Requirement", err_msg)
         else: CopyableErrorDialog("Plotting Error", "An error occurred while mathematically processing the data:", err_msg, self).exec()
 
@@ -6411,7 +6645,10 @@ class BadgerLoopQtGraph(QMainWindow):
         self._execute_sigma_clipping(new_name, calculated_blocks)
 
     def _execute_sigma_clipping(self, new_name, calculated_blocks):
-        self._append_column_to_file(self.dataset.filename, new_name, calculated_blocks)
+        command = AppendColumnCommand(self, new_name, calculated_blocks, f"Sigma Clip ➔ '{new_name}'")
+        self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
+        return
+        # Unreachable code below bypassed by command reload
         
         opts = getattr(self, 'last_load_opts', {"type": self.file_type, "delimiter": ",", "has_header": True})
         from PyQt6.QtWidgets import QProgressDialog, QApplication

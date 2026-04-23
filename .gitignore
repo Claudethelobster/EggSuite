@@ -207,3 +207,7 @@ Thumbs.db
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+# Local Development Tools
+dev_tools/
+*.patch
+*.json_delta

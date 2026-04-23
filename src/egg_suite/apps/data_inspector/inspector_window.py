@@ -6,7 +6,7 @@ from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelectionMod
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
     QLabel, QTableView, QMenu, QTreeWidget, QTreeWidgetItem, QHeaderView,
-    QSplitter, QTextEdit, QDialog
+    QSplitter, QTextEdit, QDialog, QTabWidget
 )
 from PyQt6.QtGui import QAction
 from ui.theme import theme
@@ -197,6 +197,7 @@ class DataInspectorWindow(QMainWindow):
                 history = self.workspace.datasets[self.current_dataset.filename]["history"]
                 if history.undo():
                     self.show_toast("Undo Successful", "The previous action has been reverted.")
+                    self._refresh_timeline_ui()
                 else:
                     self.show_toast("History Empty", "There is nothing to undo.", is_error=True)
             except Exception as e:
@@ -209,6 +210,7 @@ class DataInspectorWindow(QMainWindow):
                 history = self.workspace.datasets[self.current_dataset.filename]["history"]
                 if history.redo():
                     self.show_toast("Redo Successful", "The action has been reapplied.")
+                    self._refresh_timeline_ui()
                 else:
                     self.show_toast("Timeline End", "There is nothing to redo.", is_error=True)
             except Exception as e:
@@ -347,26 +349,47 @@ class DataInspectorWindow(QMainWindow):
         self.splitter.addWidget(table_container)
 
         # 3. RIGHT SIDE: The Inspector Sidebar
-        self.sidebar = QWidget()
-        sidebar_layout = QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(15, 0, 0, 0)
+        self.sidebar = QTabWidget()
+        
+        # --- TAB A: Column Diagnostics ---
+        diag_tab = QWidget()
+        diag_layout = QVBoxLayout(diag_tab)
         
         lbl = QLabel("<b>Column Diagnostics</b>")
         lbl.setStyleSheet(f"font-size: 16px; color: {theme.primary_text};")
-        sidebar_layout.addWidget(lbl)
+        diag_layout.addWidget(lbl)
         
         self.col_stats_view = QTextEdit()
         self.col_stats_view.setReadOnly(True)
         self.col_stats_view.setStyleSheet(f"background-color: {theme.bg}; color: {theme.fg}; border: 1px solid {theme.border}; border-radius: 4px; font-family: Consolas, monospace; font-size: 13px; padding: 10px;")
         self.col_stats_view.setHtml("<span style='color: #888;'>Select a column header to view statistics.</span>")
-        sidebar_layout.addWidget(self.col_stats_view)
+        diag_layout.addWidget(self.col_stats_view)
         
         self.btn_drop_nan = QPushButton("🗑️ Drop NaNs in Column")
         self.btn_drop_nan.setStyleSheet(f"padding: 6px; border: 1px solid {theme.border}; border-radius: 4px;")
         self.btn_drop_nan.setEnabled(False)
         self.btn_drop_nan.clicked.connect(self._drop_nans)
-        sidebar_layout.addWidget(self.btn_drop_nan)
+        diag_layout.addWidget(self.btn_drop_nan)
         
+        self.sidebar.addTab(diag_tab, "Diagnostics")
+        
+        # --- TAB B: The History Timeline ---
+        time_tab = QWidget()
+        time_layout = QVBoxLayout(time_tab)
+        
+        time_lbl = QLabel("<b>Branching History</b><br>Double-click a node to jump to that timeline.")
+        time_lbl.setStyleSheet(f"color: {theme.fg};")
+        time_layout.addWidget(time_lbl)
+        
+        self.history_tree_widget = QTreeWidget()
+        self.history_tree_widget.setHeaderHidden(True)
+        self.history_tree_widget.setStyleSheet(f"QTreeWidget {{ background-color: {theme.bg}; color: {theme.fg}; border: 1px solid {theme.border}; font-size: 12px; }}")
+        self.history_tree_widget.itemDoubleClicked.connect(self._on_timeline_jump)
+        time_layout.addWidget(self.history_tree_widget)
+        
+        self.sidebar.addTab(time_tab, "Timeline")
+        # -----------------------------------
+
         self.splitter.addWidget(self.sidebar)
         
         # Set default proportions (Table gets 80% of space, Sidebar gets 20%)
@@ -445,6 +468,7 @@ class DataInspectorWindow(QMainWindow):
             
         # Execute the command (this automatically drops the rows and syncs the UI)
         self.workspace.datasets[target_file]["history"].execute_command(command)
+        self._refresh_timeline_ui()
         
         QMessageBox.information(self, "Success", f"Successfully dropped {command.dropped_count} corrupted rows.")
         
@@ -543,6 +567,64 @@ class DataInspectorWindow(QMainWindow):
         ds = self.workspace.get_dataset(path)
         self._load_dataset_into_view(ds)
 
+    def _refresh_timeline_ui(self):
+        """Recursively draws the HistoryTree into the QTreeWidget."""
+        if not hasattr(self, 'history_tree_widget'): return
+        self.history_tree_widget.blockSignals(True)
+        self.history_tree_widget.clear()
+        
+        if not self.current_dataset or self.current_dataset.filename not in self.workspace.datasets:
+            self.history_tree_widget.blockSignals(False)
+            return
+            
+        history = self.workspace.datasets[self.current_dataset.filename]["history"]
+        
+        def build_branch(node, parent_item):
+            # Create the visual item
+            prefix = "🟢 " if node == history.current_node else "⚪ "
+            item = QTreeWidgetItem([f"{prefix}[{node.timestamp}] {node.description}"])
+            
+            # Make the active node bold and blue
+            if node == history.current_node:
+                from PyQt6.QtGui import QFont, QColor
+                f = item.font(0); f.setBold(True); item.setFont(0, f)
+                item.setForeground(0, QColor(theme.primary_text))
+                
+            # Stash the raw node object in the item so we can fetch it when clicked!
+            item.setData(0, Qt.ItemDataRole.UserRole, id(node))
+            self._node_memory_map[id(node)] = node 
+            
+            if parent_item is None:
+                self.history_tree_widget.addTopLevelItem(item)
+            else:
+                parent_item.addChild(item)
+                
+            # Recurse down the branches
+            for child in node.children:
+                build_branch(child, item)
+                
+            item.setExpanded(True)
+
+        self._node_memory_map = {} # Safety map to prevent Python garbage collecting our nodes
+        build_branch(history.root, None)
+        self.history_tree_widget.blockSignals(False)
+
+    def _on_timeline_jump(self, item, column):
+        node_id = item.data(0, Qt.ItemDataRole.UserRole)
+        target_node = self._node_memory_map.get(node_id)
+        
+        if not target_node: return
+        
+        history = self.workspace.datasets[self.current_dataset.filename]["history"]
+        
+        # Teleport!
+        try:
+            history.teleport_to_node(target_node)
+            self.show_toast("Timeline Changed", f"Jumped to: {target_node.description}")
+            self._refresh_timeline_ui()
+        except Exception as e:
+            self.show_toast("Time Travel Error", str(e), is_error=True)
+
     def _load_dataset_into_view(self, dataset):
         self.current_dataset = dataset
         
@@ -586,3 +668,5 @@ class DataInspectorWindow(QMainWindow):
             
         if hasattr(self, 'table_view'):
             self.table_view.clearSelection()
+            
+        self._refresh_timeline_ui()

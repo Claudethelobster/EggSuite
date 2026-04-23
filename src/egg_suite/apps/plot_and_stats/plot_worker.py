@@ -120,12 +120,18 @@ class PlotWorkerThread(QThread):
 
                         # Apply Log Scales AFTER FFT (or normally for Time Domain)
                         with np.errstate(divide='ignore', invalid='ignore'):
+                            # --- FIX: Sync uncertainty arrays if FFT altered the length ---
+                            if len(dx) != len(x): dx = np.zeros_like(x)
+                            if len(dy) != len(y): dy = np.zeros_like(y)
+                            
                             if xlog:
                                 mask = x > 0
                                 x, y = np.log(x[mask]) / np.log(xbase), y[mask]
+                                dx, dy = dx[mask], dy[mask] # <-- Sync slicing!
                             if ylog:
                                 mask = y > 0
                                 x, y = x[mask], np.log(y[mask]) / np.log(ybase)
+                                dx, dy = dx[mask], dy[mask] # <-- Sync slicing!
                                 
                         valid = np.isfinite(x) & np.isfinite(y)
                         x, y = x[valid], y[valid]

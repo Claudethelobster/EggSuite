@@ -276,7 +276,7 @@ class Dataset:
             self.sweeps.append(Sweep(self.num_outputs+self.num_inputs, num_points))
             
             for p in BLrange(0, self.sweeps[i].num_points):
-                self.sweeps[i].data[p,:] = [float(v) for v in f.readline().split('\t')]
+                self.sweeps[i].data[p,:] = [float(v) for v in f.readline().strip().split('\t') if v.strip()][:self.sweeps[i].data.shape[1]]
                 
         f.close()
 
