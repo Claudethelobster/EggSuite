@@ -220,8 +220,11 @@ class Renderer2D:
                 axis_side = pkg.get("axis", "L")
                 pkg_type = pkg.get("type", "standard")
                 
-                intensity = 0.8 if total_plotted_sw <= 1 else 0.4 + 0.6 * (i / max(1, total_plotted_sw - 1))
-                rgba = cmap(intensity)
+                if getattr(mw, 'group_sweeps_legend', False):
+                    rgba = cmap(0.8)
+                else:
+                    intensity = 0.8 if total_plotted_sw <= 1 else 0.4 + 0.6 * (i / max(1, total_plotted_sw - 1))
+                    rgba = cmap(intensity)
                 line_color = (int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255), 255)
                 
                 original_pair = mw.series_data.get("2D", [])[pair_idx] if pair_idx < len(mw.series_data.get("2D", [])) else {}

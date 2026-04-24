@@ -521,7 +521,25 @@ class MatplotlibPopout(QMainWindow):
 
         mpl_symbols = {'o':'o', 's':'s', 't':'^', 't1':'^', 't2':'v', 't3':'>', 'd':'d', '+':'+', 'x':'x', 'p':'p', 'h':'h', 'star':'*'}
 
+        # --- FIX 2: Explicitly draw Confidence Bands (FillBetweenItems) ---
+        for fit in getattr(self.main_window, 'active_fits', []):
+            band = fit.get("band_item")
+            if band is not None and band.isVisible():
+                x_vis = fit["plot_item"].xData
+                y_vis = fit["plot_item"].yData
+                y_up = y_vis + fit["band_std"]
+                y_dn = y_vis - fit["band_std"]
+                
+                x_raw, y_up_raw = self.main_window._get_raw_fit_coords(x_vis, y_up)
+                _, y_dn_raw = self.main_window._get_raw_fit_coords(x_vis, y_dn)
+                
+                brush = band.brush() if hasattr(band, 'brush') else pg.mkBrush(255, 0, 0, 60)
+                rgba = qcolor_to_mpl_rgba(brush.color())
+                self.ax.fill_between(x_raw, y_dn_raw, y_up_raw, facecolor=rgba, edgecolor='none', zorder=band.zValue())
+        # ------------------------------------------------------------------
+
         for item in original_plot.listDataItems():
+            if not item.isVisible(): continue # --- FIX 1: Ignore Phantom Curves ---
             if not hasattr(item, 'getData'): continue
             try:
                 data = item.getData()
