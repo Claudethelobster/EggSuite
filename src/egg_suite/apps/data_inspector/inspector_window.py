@@ -6,7 +6,7 @@ from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelectionMod
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
     QLabel, QTableView, QMenu, QTreeWidget, QTreeWidgetItem, QHeaderView,
-    QSplitter, QTextEdit, QDialog, QTabWidget
+    QSplitter, QTextEdit, QDialog, QTabWidget, QComboBox
 )
 from PyQt6.QtGui import QAction
 from ui.theme import theme
@@ -190,6 +190,11 @@ class DataInspectorWindow(QMainWindow):
         
         self.calc_menu.addAction(self.action_error_prop)
         
+        self.action_slice = QAction("Data Slicer (Split Non-Monotonic)...", self)
+        self.action_slice.setEnabled(False)
+        self.action_slice.triggered.connect(self.open_data_slicer)
+        self.edit_menu.addAction(self.action_slice)
+        
     def _trigger_undo(self):
         """Safely calls undo on the currently active file's history tree."""
         if self.current_dataset and self.current_dataset.filename in self.workspace.datasets:
@@ -295,6 +300,157 @@ class DataInspectorWindow(QMainWindow):
         self.active_toast = ToastNotification(self, title, message, is_error=is_error)
         self.active_toast.show_toast()
         
+    def open_data_slicer(self):
+        if not self.current_dataset: return
+        from apps.plot_and_stats.analysis import DataSlicerDialog
+        from PyQt6.QtWidgets import QMessageBox
+        
+        dlg = DataSlicerDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        
+        slice_str, sweep_mode, custom_sweeps, sel_cols, output_mode = dlg.get_result()
+        if not sel_cols:
+            QMessageBox.warning(self, "No Columns", "Please select at least one column to slice.")
+            return
+            
+        # Parse slice string safely
+        slice_obj = slice(None)
+        try:
+            parts = slice_str.split(':')
+            if len(parts) == 1:
+                start = int(parts[0]) if parts[0] else None
+                slice_obj = slice(start, None)
+            elif len(parts) == 2:
+                start = int(parts[0]) if parts[0] else None
+                stop = int(parts[1]) if parts[1] else None
+                slice_obj = slice(start, stop)
+        except Exception:
+            QMessageBox.warning(self, "Invalid Range", "Invalid slice syntax. Use Python format like '100:', ':500', or '100:500'.")
+            return
+
+        has_sweeps = hasattr(self.current_dataset, 'sweeps') and len(self.current_dataset.sweeps) > 0
+        total_sweeps = self.current_dataset.num_sweeps if has_sweeps else 1
+        
+        target_sweeps = []
+        if sweep_mode == "All Sweeps": target_sweeps = list(range(total_sweeps))
+        elif sweep_mode == "Current Sweep": 
+            target_sweeps = [max(0, getattr(self, 'sweep_combo', type('obj', (object,), {'currentIndex': lambda: 0})).currentIndex())]
+        else:
+            try:
+                parts = custom_sweeps.split(':')
+                start = int(parts[0]) if parts[0] else 0
+                stop = int(parts[1]) if len(parts) > 1 and parts[1] else total_sweeps
+                target_sweeps = list(range(start, stop))
+            except: target_sweeps = list(range(total_sweeps))
+
+        is_fresh_file = "Fresh File" in output_mode
+        
+        try:
+            import numpy as np
+            import os
+            from core.file_editor import FileEditor
+            from core.data_loader import DataLoaderThread
+            from PyQt6.QtWidgets import QProgressDialog, QApplication
+            from PyQt6.QtCore import Qt
+
+            if is_fresh_file:
+                # ---------------- GENERATE FRESH FILE ----------------
+                fname = self.current_dataset.filename
+                base, ext = os.path.splitext(fname)
+                new_fname = f"{base}_Sliced{ext}"
+                
+                out_lines = [f"# Source: Sliced from {os.path.basename(fname)}\n", f"# Format: ConcatenatedCSV\n", f"# Slice Range: {slice_str}\n"]
+                out_lines.append(",".join([self.current_dataset.column_names.get(c, f"Col {c}") for c in sel_cols]) + "\n")
+                
+                for sw in target_sweeps:
+                    arr = self.current_dataset.sweeps[sw].data if has_sweeps else self.current_dataset.data
+                    sliced_arr = arr[slice_obj, :]
+                    
+                    if has_sweeps and total_sweeps > 1:
+                        out_lines.append(f"# --- Sweep {sw} ---\n")
+                        
+                    for row in sliced_arr:
+                        row_vals = [f"{row[c]:.6g}" if not np.isnan(row[c]) else "NaN" for c in sel_cols]
+                        out_lines.append(",".join(row_vals) + "\n")
+                        
+                with open(new_fname, 'w', encoding='utf-8-sig') as f:
+                    f.writelines(out_lines)
+                    
+                opts = {"type": "ConcatenatedCSV" if has_sweeps and total_sweeps > 1 else "CSV", "delimiter": ",", "has_header": True}
+                self.progress_dialog = QProgressDialog("Loading Sliced File...", "Cancel", 0, 100, self)
+                self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                self.progress_dialog.show()
+                
+                def on_fresh_loaded(ds):
+                    if hasattr(self, 'progress_dialog') and self.progress_dialog is not None:
+                        self.progress_dialog.accept()
+                        self.progress_dialog.deleteLater()
+                        self.progress_dialog = None
+                    self.workspace.add_single_file(new_fname, ds)
+                    self._load_dataset_into_view(ds)
+                    QMessageBox.information(self, "Success", f"Sliced data saved to new file:\n{os.path.basename(new_fname)}")
+                    
+                self.loader_thread = DataLoaderThread(new_fname, opts)
+                self.loader_thread.progress.connect(lambda p, t: self.progress_dialog.setValue(p) if hasattr(self, 'progress_dialog') and self.progress_dialog else None)
+                self.loader_thread.finished.connect(on_fresh_loaded)
+                self.loader_thread.start()
+                return
+
+            else:
+                # ---------------- APPEND AS NEW COLUMNS ----------------
+                file_type = type(self.current_dataset).__name__.replace("Dataset", "")
+                if file_type == "CSV": file_type = "CSV"
+                elif file_type == "MultiCSV": file_type = "MultiCSV"
+                elif file_type == "HDF5": file_type = "HDF5"
+                else: file_type = "BadgerLoop"
+                if getattr(self.current_dataset, 'is_concatenated', False): file_type = "ConcatenatedCSV"
+                opts = {"type": file_type, "delimiter": ",", "has_header": True}
+
+                for c in sel_cols:
+                    col_name = self.current_dataset.column_names.get(c, f"Col {c}")
+                    new_name = f"{col_name} (Sliced)"
+                    blocks = []
+                    
+                    for sw in range(total_sweeps):
+                        arr = self.current_dataset.sweeps[sw].data if has_sweeps else self.current_dataset.data
+                        target_data = np.asarray(arr[:, c], dtype=np.float64)
+                        
+                        data_padded = np.full_like(target_data, np.nan)
+                        
+                        if sw in target_sweeps:
+                            idx_array = np.arange(len(target_data))[slice_obj]
+                            data_padded[idx_array] = target_data[idx_array]
+                            
+                        blocks.append(data_padded)
+                        
+                    from core.file_editor import FileEditor
+                    FileEditor.append_column_to_file(file_type, self.current_dataset, self.current_dataset.filename, new_name, blocks, opts)
+                    
+                    new_idx = len(self.current_dataset.column_names)
+                    self.current_dataset.column_names[new_idx] = new_name
+                    if hasattr(self.current_dataset, 'num_inputs'): self.current_dataset.num_inputs += 1
+                        
+                    for i in range(total_sweeps):
+                        if has_sweeps:
+                            self.current_dataset.sweeps[i].data = np.column_stack((self.current_dataset.sweeps[i].data, blocks[i]))
+                        else:
+                            self.current_dataset.data = np.column_stack((self.current_dataset.data, blocks[i]))
+                            
+                from core.history_engine import EggCommand
+                class SlicerCommand(EggCommand):
+                    def __init__(self): super().__init__(f"Slice Rows [{slice_str}]")
+                    def execute(self): pass
+                    def undo(self): pass
+                self.workspace.datasets[self.current_dataset.filename]["history"].execute_command(SlicerCommand())
+                self._refresh_timeline_ui()
+                
+                self._on_sweep_changed(max(0, getattr(self, 'sweep_combo', type('obj', (object,), {'currentIndex': lambda: 0})).currentIndex()))
+                QMessageBox.information(self, "Success", f"Successfully appended {len(sel_cols)} sliced columns.")
+
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(self, "Error", f"Failed to slice data:\n\n{e}\n{traceback.format_exc()}")
+
     def _open_uncertainty_calculator(self):
         if not self.current_dataset or self.df.empty:
             return
@@ -314,6 +470,12 @@ class DataInspectorWindow(QMainWindow):
         table_container = QWidget()
         table_layout = QVBoxLayout(table_container)
         table_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.sweep_combo = QComboBox()
+        self.sweep_combo.setStyleSheet(f"background-color: {theme.panel_bg}; color: {theme.fg}; border: 1px solid {theme.border}; padding: 4px;")
+        self.sweep_combo.currentIndexChanged.connect(self._on_sweep_changed)
+        self.sweep_combo.setVisible(False)
+        table_layout.addWidget(self.sweep_combo)
 
         self.table_view = QTableView()
         self.table_model = PandasTableModel(self.df)
@@ -625,6 +787,18 @@ class DataInspectorWindow(QMainWindow):
         except Exception as e:
             self.show_toast("Time Travel Error", str(e), is_error=True)
 
+    def _on_sweep_changed(self, idx):
+        if not self.current_dataset or idx < 0: return
+        try:
+            data_array = self.current_dataset.sweeps[idx].data
+            num_cols = self.current_dataset.num_inputs + getattr(self.current_dataset, 'num_outputs', 0)
+            cols = [self.current_dataset.column_names.get(i, f"Column {i}") for i in range(num_cols)]
+            self.df = pd.DataFrame(data_array, columns=cols)
+            self.table_model.set_dataframe(self.df)
+            if hasattr(self, 'stats_label'):
+                self.stats_label.setText(f"Rows: {len(self.df):,} | Columns: {len(self.df.columns)}")
+        except Exception: pass
+
     def _load_dataset_into_view(self, dataset):
         self.current_dataset = dataset
         
@@ -637,6 +811,8 @@ class DataInspectorWindow(QMainWindow):
             # Disable the menu item when no data is loaded
             if hasattr(self, 'action_error_prop'):
                 self.action_error_prop.setEnabled(False)
+            if hasattr(self, 'action_slice'):
+                self.action_slice.setEnabled(False)
             return
 
         # Dynamically build the column headers from the dataset's dictionary
@@ -645,13 +821,24 @@ class DataInspectorWindow(QMainWindow):
         
         # --- FIX: Safely route the data extraction based on the file format! ---
         data_array = None
-        if hasattr(dataset, 'data') and dataset.data is not None:
-            data_array = dataset.data
-        elif hasattr(dataset, 'sweeps') and len(dataset.sweeps) > 0:
+        has_sweeps = hasattr(dataset, 'sweeps') and len(dataset.sweeps) > 1
+        
+        self.sweep_combo.blockSignals(True)
+        self.sweep_combo.clear()
+        if has_sweeps:
+            self.sweep_combo.addItems([getattr(s, 'name', f"Sweep {i}") for i, s in enumerate(dataset.sweeps)])
+            self.sweep_combo.setVisible(True)
             data_array = dataset.sweeps[0].data
-            
+        else:
+            self.sweep_combo.setVisible(False)
+            if hasattr(dataset, 'data') and dataset.data is not None:
+                data_array = dataset.data
+            elif hasattr(dataset, 'sweeps') and len(dataset.sweeps) > 0:
+                data_array = dataset.sweeps[0].data
+                
         if data_array is None:
             data_array = [] # Absolute failsafe for empty arrays
+        self.sweep_combo.blockSignals(False)
         # -----------------------------------------------------------------------
         
         # Convert the massive NumPy array into a Pandas DataFrame instantly
@@ -665,6 +852,8 @@ class DataInspectorWindow(QMainWindow):
         # Enable the menu item now that data is ready
         if hasattr(self, 'action_error_prop'):
             self.action_error_prop.setEnabled(True)
+        if hasattr(self, 'action_slice'):
+            self.action_slice.setEnabled(True)
             
         if hasattr(self, 'table_view'):
             self.table_view.clearSelection()

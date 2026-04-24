@@ -138,19 +138,21 @@ class RenameColumnCommand(EggCommand):
         self.mw._trigger_silent_reload()
 
 class DeleteColumnCommand(EggCommand):
-    def __init__(self, mw, col_idx, col_name, col_data):
-        super().__init__(f"Delete Column '{col_name}'")
+    def __init__(self, mw, col_indices, col_names, col_data_list):
+        n_str = ", ".join(col_names) if len(col_names) <= 3 else f"{len(col_names)} columns"
+        super().__init__(f"Delete Columns: {n_str}")
         self.mw = mw
-        self.col_idx = col_idx
-        self.col_name = col_name
-        self.col_data = col_data
+        self.col_indices = col_indices
+        self.col_names = col_names
+        self.col_data_list = col_data_list
 
     def execute(self):
-        self.mw._delete_column_in_file(self.mw.dataset.filename, self.col_idx)
+        self.mw._delete_columns_in_file(self.mw.dataset.filename, self.col_indices)
         self.mw._trigger_silent_reload()
 
     def undo(self):
-        self.mw._append_column_to_file(self.mw.dataset.filename, self.col_name, self.col_data)
+        for name, blocks in zip(self.col_names, self.col_data_list):
+            self.mw._append_column_to_file(self.mw.dataset.filename, name, blocks)
         self.mw._trigger_silent_reload()
 
 class AppendColumnCommand(EggCommand):
@@ -359,6 +361,7 @@ class BadgerLoopQtGraph(QMainWindow):
         if hasattr(self, 'inspect_table_action'):
             self.inspect_table_action.setText("Sweep table" if has_sweeps else "Inspect data table")
             
+        can_have_uncerts = True # Allow uncertainties for BadgerLoop!
         if not has_sweeps:
             self.errorbar_btn.setVisible(False)
             self.errorbar_sigma_edit.setVisible(False)
@@ -367,16 +370,20 @@ class BadgerLoopQtGraph(QMainWindow):
             
         avg_on = getattr(self, 'average_enabled', False)
         uncerts_on = getattr(self, 'csv_uncerts_enabled', False)
+        errs_on = getattr(self, 'errorbars_enabled', False)
         
         if avg_on:
             self.toggle_avg_btn.setVisible(has_sweeps)
             self.toggle_uncert_btn.setVisible(False)
+            if hasattr(self, 'export_avg_err_btn'): self.export_avg_err_btn.setVisible(errs_on)
         elif uncerts_on:
             self.toggle_avg_btn.setVisible(False)
             self.toggle_uncert_btn.setVisible(can_have_uncerts)
+            if hasattr(self, 'export_avg_err_btn'): self.export_avg_err_btn.setVisible(False)
         else:
             self.toggle_avg_btn.setVisible(has_sweeps)
             self.toggle_uncert_btn.setVisible(can_have_uncerts)
+            if hasattr(self, 'export_avg_err_btn'): self.export_avg_err_btn.setVisible(False)
             
         self._update_uncert_visibility()
         
@@ -1767,6 +1774,7 @@ class BadgerLoopQtGraph(QMainWindow):
         self.inspect_table_action.triggered.connect(self.prompt_sweep_table)
         inspect_menu.addAction("Rename / Delete columns").triggered.connect(self.manage_columns_dialog)
         inspect_menu.addAction("Create custom column").triggered.connect(self.prompt_create_column)
+        inspect_menu.addAction("Piecewise Propagation Converter").triggered.connect(self.open_piecewise_propagator)
         inspect_menu.addSeparator()
         
         crosshair_action = QAction("Toggle crosshairs", self)
@@ -2093,21 +2101,28 @@ class BadgerLoopQtGraph(QMainWindow):
             return
             
         elif action == "delete":
-            col_name = self.dataset.column_names.get(col_idx, "Unknown")
+            if not col_idx: return
+            col_names = [self.dataset.column_names.get(i, f"Col {i}") for i in col_idx]
+            n_str = "\n- ".join(col_names) if len(col_names) <= 10 else f"{len(col_names)} columns"
             ans = QMessageBox.warning(
                 self, "Confirm Deletion", 
-                f"Are you sure you want to permanently delete the column '{col_name}' from the mirror file?\n\nThis action is irreversible.", 
+                f"Are you sure you want to permanently delete the following columns from the mirror file?\n- {n_str}\n\nThis action is irreversible.", 
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if ans != QMessageBox.StandardButton.Yes: return
+            
             is_csv = (self.file_type in ["CSV", "ConcatenatedCSV"])
             sweeps = range(self.dataset.num_sweeps) if not is_csv else [0]
-            col_data_blocks = []
-            for sw in sweeps:
-                arr = self.dataset.data if is_csv else self.dataset.sweeps[sw].data
-                col_data_blocks.append(np.asarray(arr[:, col_idx], dtype=np.float64).copy())
+            
+            col_data_list = []
+            for c_idx in col_idx:
+                blocks = []
+                for sw in sweeps:
+                    arr = self.dataset.data if is_csv else self.dataset.sweeps[sw].data
+                    blocks.append(np.asarray(arr[:, c_idx], dtype=np.float64).copy())
+                col_data_list.append(blocks)
                 
-            command = DeleteColumnCommand(self, col_idx, col_name, col_data_blocks)
+            command = DeleteColumnCommand(self, col_idx, col_names, col_data_list)
             self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
             return
 
@@ -2125,6 +2140,149 @@ class BadgerLoopQtGraph(QMainWindow):
         self.loader_thread.finished.connect(lambda ds: self._on_load_finished(ds, self.dataset.filename, opts))
         self.loader_thread.error.connect(self._on_load_error)
         self.loader_thread.start()
+
+    def open_piecewise_propagator(self):
+        if not self.dataset: return
+        
+        if self.file_type == "MultiCSV":
+            self._intercept_folder_edit(self._show_actual_piecewise_dialog)
+            return
+        
+        fname = self.dataset.filename
+        orig_name = os.path.basename(fname)
+        directory = os.path.dirname(fname)
+
+        if not orig_name.startswith("MIRROR_") and self.file_type != "ConcatenatedCSV":
+            name_only, ext = os.path.splitext(orig_name)
+            import glob
+            search_pattern = os.path.join(directory, f"MIRROR_{name_only}*{ext}")
+            existing_mirrors = [os.path.basename(p) for p in glob.glob(search_pattern)]
+
+            if not existing_mirrors:
+                target_file = os.path.join(directory, f"MIRROR_{orig_name}")
+                try: 
+                    if self.file_type == "CSV": self._write_csv_mirror(target_file)
+                    else:
+                        import shutil
+                        shutil.copy2(fname, target_file)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to create mirror:\n{e}")
+                    return
+                QMessageBox.information(self, "Mirror Created", "To protect original data, a Mirror file has been created and loaded.")
+            else:
+                dlg = QDialog(self)
+                dlg.setWindowTitle("Mirror File Exists")
+                dlg.setFixedSize(450, 150)
+                l = QVBoxLayout(dlg)
+                l.addWidget(QLabel("Select an existing mirror to load, or create a new one:"))
+                combo = QComboBox()
+                combo.addItem("--- Create New Mirror ---")
+                combo.addItems(existing_mirrors)
+                l.addWidget(combo)
+                btn_box = QHBoxLayout()
+                ok, cancel = QPushButton("OK"), QPushButton("Cancel")
+                btn_box.addWidget(ok); btn_box.addWidget(cancel)
+                l.addLayout(btn_box)
+                ok.clicked.connect(dlg.accept); cancel.clicked.connect(dlg.reject)
+                if dlg.exec() != QDialog.DialogCode.Accepted: return
+                
+                choice = combo.currentText()
+                if choice == "--- Create New Mirror ---":
+                    import re
+                    max_num = max([int(m.group(1)) for m in [re.search(r'\((\d+)\)', x) for x in existing_mirrors] if m] + [1 if f"MIRROR_{orig_name}" in existing_mirrors else 0])
+                    target_file = os.path.join(directory, f"MIRROR_{name_only} ({max_num + 1}){ext}")
+                    
+                    if self.file_type == "CSV": self._write_csv_mirror(target_file)
+                    else:
+                        import shutil
+                        shutil.copy2(fname, target_file)
+                else:
+                    target_file = os.path.join(directory, choice)
+
+            opts = getattr(self, 'last_load_opts', {"type": self.file_type, "delimiter": ",", "has_header": True})
+            if self.file_type == "CSV": opts["delimiter"] = ","
+            
+            self.progress_dialog = QProgressDialog("Loading Mirror File...", "Cancel", 0, 100, self)
+            self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self.progress_dialog.setCancelButton(None) 
+            self.progress_dialog.setMinimumDuration(0) 
+            self.progress_dialog.show()
+
+            def on_mirror_loaded(dataset):
+                self._on_load_finished(dataset, target_file, opts)
+                self._show_actual_piecewise_dialog() 
+
+            self.loader_thread = DataLoaderThread(target_file, opts)
+            self.loader_thread.progress.connect(self._update_progress_ui)
+            self.loader_thread.finished.connect(on_mirror_loaded)
+            self.loader_thread.error.connect(self._on_load_error)
+            self.loader_thread.start()
+            return
+
+        self._show_actual_piecewise_dialog()
+
+    def _show_actual_piecewise_dialog(self):
+        from ui.dialogs.data_mgmt import PiecewisePropagationDialog
+        dlg = PiecewisePropagationDialog(self.dataset, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        
+        new_name, input_idx, cond_idx, thresh, eq_a, eq_b = dlg.get_result()
+        if not new_name or not eq_a or not eq_b: return
+        
+        existing_names = list(self.dataset.column_names.values())
+        if new_name in existing_names:
+            QMessageBox.warning(self, "Duplicate Name", f"The column '{new_name}' already exists.")
+            return
+
+        is_csv = (self.file_type == "CSV")
+        sweeps = range(self.dataset.num_sweeps) if not is_csv else [0]
+        calculated_data_blocks = []
+        
+        import re
+        def prep_eq(eq):
+            py_eq = eq.replace('^', '**')
+            math_funcs = ['arcsinh','arccosh','arctanh','arcsin','arccos','arctan','sinh','cosh','tanh','sin','cos','tan', 'exp', 'log10', 'log2', 'log', 'abs']
+            for f in math_funcs:
+                py_eq = re.sub(r'\b' + f + r'\s*\(', f'np.{f}(', py_eq, flags=re.IGNORECASE)
+            py_eq = re.sub(r'\bln\s*\(', 'np.log(', py_eq, flags=re.IGNORECASE)
+            return py_eq
+            
+        py_eq_a = prep_eq(eq_a)
+        py_eq_b = prep_eq(eq_b)
+        
+        try:
+            for sw in sweeps:
+                arr = self.dataset.data if is_csv else self.dataset.sweeps[sw].data
+                x_data = np.asarray(arr[:, input_idx], dtype=np.float64)
+                
+                if cond_idx == -1:
+                    cond_data = np.arange(len(x_data), dtype=np.float64)
+                else:
+                    cond_data = np.asarray(arr[:, cond_idx], dtype=np.float64)
+                
+                env = {"np": np, "e": np.e, "pi": np.pi}
+                env_a = dict(env); env_a["x"] = x_data
+                env_b = dict(env); env_b["x"] = x_data
+                
+                with np.errstate(all='ignore'):
+                    y_a = np.asarray(eval(py_eq_a, {"__builtins__": {}}, env_a), dtype=np.float64)
+                    if y_a.ndim == 0: y_a = np.full_like(x_data, float(y_a))
+                    
+                    y_b = np.asarray(eval(py_eq_b, {"__builtins__": {}}, env_b), dtype=np.float64)
+                    if y_b.ndim == 0: y_b = np.full_like(x_data, float(y_b))
+                    
+                mask = cond_data <= thresh
+                final_y = np.where(mask, y_a, y_b)
+                calculated_data_blocks.append(final_y)
+                
+            command = AppendColumnCommand(self, new_name, calculated_data_blocks, f"Piecewise ➔ '{new_name}'")
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(command)
+            QMessageBox.information(self, "Success", f"Piecewise column '{new_name}' created successfully.")
+            return
+            
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(self, "Execution Error", f"Failed to calculate piecewise data:\n\n{e}\n\n{traceback.format_exc()}")
 
     def prompt_create_column(self):
         if not self.dataset: return
@@ -2482,9 +2640,9 @@ class BadgerLoopQtGraph(QMainWindow):
         opts = getattr(self, 'last_load_opts', {})
         FileEditor.rewrite_column_name_in_file(self.file_type, self.dataset, target_file, col_idx, new_name, opts)
 
-    def _delete_column_in_file(self, target_file, col_idx):
+    def _delete_columns_in_file(self, target_file, col_indices):
         opts = getattr(self, 'last_load_opts', {})
-        FileEditor.delete_column_in_file(self.file_type, self.dataset, target_file, col_idx, opts)
+        FileEditor.delete_columns_in_file(self.file_type, self.dataset, target_file, col_indices, opts)
 
     def _execute_universal_fit(self, base_model, param_names, param_config, x, y):
         free_params = []
@@ -2589,6 +2747,7 @@ class BadgerLoopQtGraph(QMainWindow):
             self.save_function_btn.setVisible(True); self.clear_fit_btn.setVisible(True); self.func_details_btn.setVisible(True)
             if hasattr(self, 'edit_fit_btn'): self.edit_fit_btn.setVisible(True)
             if hasattr(self, 'save_fit_col_btn'): self.save_fit_col_btn.setVisible(True)
+            if hasattr(self, 'export_fit_csv_btn'): self.export_fit_csv_btn.setVisible(True)
 
             # Annihilate the progress dialog ONLY when the plot is completely finished
             self.progress_dlg.setValue(100)
@@ -2730,6 +2889,7 @@ class BadgerLoopQtGraph(QMainWindow):
             
             self.save_function_btn.setVisible(True); self.clear_fit_btn.setVisible(True); self.func_details_btn.setVisible(True)
             if hasattr(self, 'save_fit_col_btn'): self.save_fit_col_btn.setVisible(True) 
+            if hasattr(self, 'export_fit_csv_btn'): self.export_fit_csv_btn.setVisible(True)
             if hasattr(self, 'edit_fit_btn'): self.edit_fit_btn.setVisible(True)
 
         def on_error(err_str):
@@ -2833,17 +2993,35 @@ class BadgerLoopQtGraph(QMainWindow):
         aux_dict = {}
         
         is_csv = (self.file_type in ["CSV", "ConcatenatedCSV"])
-        is_averaged = (not is_csv) and getattr(self, 'average_enabled', False)
+        is_averaged = getattr(self, 'average_enabled', False)
         
         xlog = self.xscale.currentText() == "Log"
         ylog = self.yscale.currentText() == "Log"
         xbase = getattr(self, '_parse_log_base', lambda val: 10.0)(self.xbase.text())
         ybase = getattr(self, '_parse_log_base', lambda val: 10.0)(self.ybase.text())
         
-        if is_csv:
-            x_raw = np.asarray(self.dataset.data[:, xidx], dtype=np.float64)
-            y_raw = np.asarray(self.dataset.data[:, yidx], dtype=np.float64)
-            c_raw_dict = {c: np.asarray(self.dataset.data[:, c], dtype=np.float64) for c in aux_cols}
+        # --- UNIFIED EXTRACTION ENGINE ---
+        # Treat ALL files as sweep-based objects
+        if not hasattr(self.dataset, 'sweeps') or len(self.dataset.sweeps) == 0:
+            sweeps_list = [self.dataset]
+        else:
+            sweeps_list = self.dataset.sweeps
+            
+        # Respect the UI sweep filter if applicable
+        target_sweeps = self.parse_list(self.sweeps_edit.text())
+        if target_sweeps == -1: 
+            target_sweeps = list(range(len(sweeps_list)))
+            
+        x_list, y_list = [], []
+        for c in aux_cols: aux_dict[c] = []
+
+        for sw_idx in target_sweeps:
+            if sw_idx >= len(sweeps_list): continue
+            sw = sweeps_list[sw_idx].data
+            
+            x_raw = np.asarray(sw[:, xidx], dtype=np.float64)
+            y_raw = np.asarray(sw[:, yidx], dtype=np.float64)
+            c_raw_dict = {c: np.asarray(sw[:, c], dtype=np.float64) for c in aux_cols}
             
             with np.errstate(divide='ignore', invalid='ignore'):
                 if xlog: 
@@ -2854,56 +3032,30 @@ class BadgerLoopQtGraph(QMainWindow):
                     for c in aux_cols: c_raw_dict[c] = c_raw_dict[c][mask]
                     
             valid = np.isfinite(x_raw) & np.isfinite(y_raw)
-            x = x_raw[valid]
-            y = y_raw[valid]
-            for c in aux_cols: aux_dict[c] = c_raw_dict[c][valid]
-        else:
-            sweeps = self.parse_list(self.sweeps_edit.text())
-            if sweeps == -1: sweeps = list(range(self.dataset.num_sweeps))
+            x_valid = x_raw[valid]
+            y_valid = y_raw[valid]
             
-            x_list, y_list = [], []
-            for c in aux_cols: aux_dict[c] = []
-
-            for sw_idx in sweeps:
-                if sw_idx >= len(self.dataset.sweeps): continue
-                sw = self.dataset.sweeps[sw_idx].data
-                x_raw = np.asarray(sw[:, xidx], dtype=np.float64)
-                y_raw = np.asarray(sw[:, yidx], dtype=np.float64)
-                
-                c_raw_dict = {c: np.asarray(sw[:, c], dtype=np.float64) for c in aux_cols}
-                    
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    if xlog: 
-                        mask = x_raw > 0; x_raw = np.log(x_raw[mask]) / np.log(xbase); y_raw = y_raw[mask]
-                        for c in aux_cols: c_raw_dict[c] = c_raw_dict[c][mask]
-                    if ylog: 
-                        mask = y_raw > 0; x_raw = x_raw[mask]; y_raw = np.log(y_raw[mask]) / np.log(ybase)
-                        for c in aux_cols: c_raw_dict[c] = c_raw_dict[c][mask]
-                        
-                valid = np.isfinite(x_raw) & np.isfinite(y_raw)
-                x_valid = x_raw[valid]
-                y_valid = y_raw[valid]
-                
-                if len(x_valid) == 0: continue
-                
-                if is_averaged:
-                    x_list.append(np.array([np.mean(x_valid)]))
-                    y_list.append(np.array([np.mean(y_valid)]))
-                    for c in aux_cols:
-                        aux_dict[c].append(np.array([np.mean(c_raw_dict[c][valid])]))
-                else:
-                    x_list.append(x_valid)
-                    y_list.append(y_valid)
-                    for c in aux_cols:
-                        aux_dict[c].append(c_raw_dict[c][valid])
-                    
-            if x_list:
-                x = np.concatenate(x_list)
-                y = np.concatenate(y_list)
-                for c in aux_cols: aux_dict[c] = np.concatenate(aux_dict[c])
+            if len(x_valid) == 0: continue
+            
+            if is_averaged:
+                x_list.append(np.array([np.mean(x_valid)]))
+                y_list.append(np.array([np.mean(y_valid)]))
+                for c in aux_cols:
+                    aux_dict[c].append(np.array([np.mean(c_raw_dict[c][valid])]))
             else:
-                x, y = np.array([]), np.array([])
-                for c in aux_cols: aux_dict[c] = np.array([])
+                x_list.append(x_valid)
+                y_list.append(y_valid)
+                for c in aux_cols:
+                    aux_dict[c].append(c_raw_dict[c][valid])
+                    
+        if x_list:
+            x = np.concatenate(x_list)
+            y = np.concatenate(y_list)
+            for c in aux_cols: aux_dict[c] = np.concatenate(aux_dict[c])
+        else:
+            x, y = np.array([]), np.array([])
+            for c in aux_cols: aux_dict[c] = np.array([])
+        # ---------------------------------
 
         if apply_selection and getattr(self, 'selected_indices', set()):
             idx = np.array(list(self.selected_indices))
@@ -3095,6 +3247,7 @@ class BadgerLoopQtGraph(QMainWindow):
         if not active_list:
             self.save_function_btn.setVisible(False)
             if hasattr(self, 'save_fit_col_btn'): self.save_fit_col_btn.setVisible(False)
+            if hasattr(self, 'export_fit_csv_btn'): self.export_fit_csv_btn.setVisible(False)
             self.clear_fit_btn.setVisible(False)
             if hasattr(self, 'func_details_btn'): self.func_details_btn.setVisible(False)
             if hasattr(self, 'edit_fit_btn'): self.edit_fit_btn.setVisible(False)
@@ -3173,8 +3326,58 @@ class BadgerLoopQtGraph(QMainWindow):
                 err_str = ",".join([f"{err:.6e}" if not np.isnan(err) else "NaN" for err in errs])
                 f.write(f"param_errs: {err_str}\n")
                 
-    def export_fit_to_column(self):
-        if not getattr(self, 'active_fits', []): return
+    def export_fit_to_csv_file(self):
+        active_list = getattr(self, 'active_3d_fits', []) if self.plot_mode == "3D" else getattr(self, 'active_fits', [])
+        if not active_list: return
+        
+        if len(active_list) == 1:
+            fit = active_list[0]
+        else:
+            from apps.plot_and_stats.fitting import MultiFitManagerDialog
+            dlg = MultiFitManagerDialog(active_list, "Export CSV", self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                _, idx = dlg.get_selection()
+                fit = active_list[idx]
+            else:
+                return
+
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import numpy as np
+        import csv
+
+        fname, _ = QFileDialog.getSaveFileName(self, "Export Fit to CSV", "", "CSV files (*.csv)")
+        if not fname: return
+        if not fname.lower().endswith('.csv'): fname += '.csv'
+
+        try:
+            with open(fname, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                if self.plot_mode == "3D":
+                    writer.writerow(["Data export for 3D surfaces is not yet supported."])
+                    return
+
+                x_vis = fit["plot_item"].xData
+                y_vis = fit["plot_item"].yData
+                x_raw, y_raw = self._get_raw_fit_coords(x_vis, y_vis)
+                
+                headers = ["X", "Y_Fit"]
+                data_cols = [x_raw, y_raw]
+                
+                if "band_std" in fit and fit["band_std"] is not None:
+                    headers.extend(["Y_Upper_1Sigma", "Y_Lower_1Sigma"])
+                    _, y_upper_raw = self._get_raw_fit_coords(x_vis, y_vis + fit["band_std"])
+                    _, y_lower_raw = self._get_raw_fit_coords(x_vis, y_vis - fit["band_std"])
+                    data_cols.extend([y_upper_raw, y_lower_raw])
+                    
+                writer.writerow(headers)
+                for i in range(len(x_raw)):
+                    writer.writerow([col[i] for col in data_cols])
+            
+            self.show_toast("Export Complete", "High-resolution fit exported to CSV.")
+        except PermissionError:
+            QMessageBox.critical(self, "Export Failed", "Permission denied.\nPlease close the CSV file if it is open in Excel and try again.")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to write CSV:\n{e}")
         
         if len(self.active_fits) == 1:
             fit = self.active_fits[0]
@@ -3819,6 +4022,12 @@ class BadgerLoopQtGraph(QMainWindow):
         self.errorbar_sigma_edit = QLineEdit("1.0")
         self.errorbar_sigma_edit.setVisible(False)
         controls.addWidget(self.errorbar_sigma_edit)
+        
+        self.export_avg_err_btn = QPushButton("💾 Export Averages & Errors to Columns")
+        self.export_avg_err_btn.setStyleSheet(f"font-weight: bold; background-color: {theme.success_bg}; color: {theme.success_text}; border: 2px solid {theme.success_border}; border-radius: 4px; padding: 6px;")
+        self.export_avg_err_btn.clicked.connect(self._export_averages_and_errors)
+        self.export_avg_err_btn.setVisible(False)
+        controls.addWidget(self.export_avg_err_btn)
     
         controls.addSpacing(10)
         self.xcol_label = QLabel("X column")
@@ -4022,11 +4231,11 @@ class BadgerLoopQtGraph(QMainWindow):
         self.save_function_btn.setVisible(False)
         controls.addWidget(self.save_function_btn)
         
-        # --- EXPORT FIT TO COLUMN BUTTON ---
-        self.save_fit_col_btn = QPushButton("Export Fit to Column")
-        self.save_fit_col_btn.clicked.connect(self.export_fit_to_column)
-        self.save_fit_col_btn.setVisible(False)
-        controls.addWidget(self.save_fit_col_btn)
+        # --- EXPORT FIT TO CSV BUTTON ---
+        self.export_fit_csv_btn = QPushButton("Export Fit to CSV")
+        self.export_fit_csv_btn.clicked.connect(self.export_fit_to_csv_file)
+        self.export_fit_csv_btn.setVisible(False)
+        controls.addWidget(self.export_fit_csv_btn)
         # ----------------------------------------
         
         self.clear_fit_btn = QPushButton("Clear Plot")
@@ -4747,10 +4956,24 @@ class BadgerLoopQtGraph(QMainWindow):
                                             
                                     if base_model is not None:
                                         try:
-                                            samples = np.random.multivariate_normal(popt, pcov, 300)
+                                            free_idx = [i for i, p in enumerate(fit.get("param_names", [])) if fit.get("param_config", {}).get(p, {}).get("mode", "Auto") == "Auto"]
+                                            if not free_idx: free_idx = list(range(len(popt)))
+                                            free_popt = [popt[i] for i in free_idx]
+                                            
+                                            if len(free_popt) == pcov.shape[0]:
+                                                f_samples = np.random.multivariate_normal(free_popt, pcov, 300)
+                                            else:
+                                                stds = np.sqrt(np.abs(np.diag(pcov)))
+                                                f_samples = np.random.normal(loc=free_popt, scale=stds, size=(300, len(free_popt)))
+                                                
+                                            samples = []
+                                            for fs in f_samples:
+                                                s_full = list(popt)
+                                                for i, fv in zip(free_idx, fs): s_full[i] = fv
+                                                samples.append(s_full)
                                         except ValueError:
-                                            stds = np.sqrt(np.abs(np.diag(pcov)))
-                                            samples = np.random.normal(loc=popt, scale=stds, size=(300, len(popt)))
+                                            samples = [popt for _ in range(300)]
+                                            
                                         y_samples = np.array([base_model(xfit, *s_popt) for s_popt in samples])
                                         fit["band_std"] = np.nanstd(y_samples, axis=0)
                             except Exception as e: print(f"Band Error: {e}")
@@ -5038,7 +5261,61 @@ class BadgerLoopQtGraph(QMainWindow):
             self.errorbar_btn.setStyleSheet(f"font-weight: bold; background-color: {theme.primary_bg}; border: 2px solid {theme.primary_border}; border-radius: 4px; padding: 6px; color: {theme.primary_text};")
         else:
             self.errorbar_btn.setStyleSheet(f"background-color: {theme.bg}; border: 1px solid {theme.border}; border-radius: 4px; padding: 6px; color: {theme.fg};")
+        self.update_file_mode_ui()
         self.plot()
+
+    def _export_averages_and_errors(self):
+        if not self.dataset: return
+        xidx = max(0, self.xcol.currentIndex())
+        yidx = max(0, self.ycol.currentIndex())
+        x_name = self.dataset.column_names.get(xidx, "X")
+        y_name = self.dataset.column_names.get(yidx, "Y")
+        
+        is_csv = (self.file_type == "CSV")
+        sweeps = range(self.dataset.num_sweeps) if not is_csv else [0]
+        
+        x_avg_blocks, x_err_blocks = [], []
+        y_avg_blocks, y_err_blocks = [], []
+        
+        try:
+            for sw in sweeps:
+                arr = self.dataset.data if is_csv else self.dataset.sweeps[sw].data
+                x_raw = np.asarray(arr[:, xidx], dtype=np.float64)
+                y_raw = np.asarray(arr[:, yidx], dtype=np.float64)
+                
+                x_m, x_s = np.nanmean(x_raw), np.nanstd(x_raw)
+                y_m, y_s = np.nanmean(y_raw), np.nanstd(y_raw)
+                
+                x_avg = np.full(len(x_raw), np.nan); x_avg[0] = x_m
+                x_err = np.full(len(x_raw), np.nan); x_err[0] = x_s
+                y_avg = np.full(len(y_raw), np.nan); y_avg[0] = y_m
+                y_err = np.full(len(y_raw), np.nan); y_err[0] = y_s
+                
+                x_avg_blocks.append(x_avg)
+                x_err_blocks.append(x_err)
+                y_avg_blocks.append(y_avg)
+                y_err_blocks.append(y_err)
+                
+            names_and_arrs = [
+                (f"{x_name} (Avg)", x_avg_blocks), 
+                (f"{x_name} (Error)", x_err_blocks), 
+                (f"{y_name} (Avg)", y_avg_blocks), 
+                (f"{y_name} (Error)", y_err_blocks)
+            ]
+            
+            cmd_desc = f"Export Averages & Errors for {x_name}, {y_name}"
+            cmd = AppendColumnCommand(self, names_and_arrs[0][0], names_and_arrs[0][1], cmd_desc)
+            
+            for name, blocks in names_and_arrs[1:]:
+                self._append_column_to_file(self.dataset.filename, name, blocks)
+                
+            self.workspace.datasets[self.dataset.filename]["history"].execute_command(cmd)
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Success", "Averages and standard deviations successfully exported as new columns.")
+        except Exception as e:
+            import traceback
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to export averages:\n{e}\n{traceback.format_exc()}")
 
     def _fix_graphics_view(self):
         from PyQt6.QtWidgets import QGraphicsView
@@ -5595,6 +5872,7 @@ class BadgerLoopQtGraph(QMainWindow):
                 self.fit_legend.clear()
                 self.save_function_btn.setVisible(False)
                 if hasattr(self, 'save_fit_col_btn'): self.save_fit_col_btn.setVisible(False)
+                if hasattr(self, 'export_fit_csv_btn'): self.export_fit_csv_btn.setVisible(False)
                 self.clear_fit_btn.setVisible(False)
                 if hasattr(self, 'func_details_btn'): self.func_details_btn.setVisible(False)
                 if hasattr(self, 'edit_fit_btn'): self.edit_fit_btn.setVisible(False)
@@ -6801,7 +7079,6 @@ class BadgerLoopQtGraph(QMainWindow):
 
         if mode == "2D":
             # --- 2D ANALYSIS ---
-            self.analysis_menu.addAction("Data Slicer (Split Non-Monotonic)").triggered.connect(self.open_data_slicer)
             self.analysis_menu.addAction("Signal Processing (Smooth / Calculus)").triggered.connect(self.open_signal_processing)
             self.analysis_menu.addAction("Baseline Subtraction Tool").triggered.connect(self.open_baseline_subtraction)
             self.analysis_menu.addAction("Phase Space Generator (x vs dx/dt)").triggered.connect(self.open_phase_space_dialog)

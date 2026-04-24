@@ -393,7 +393,8 @@ class FileEditor:
                 f.write("\n".join(out) + "\n")
 
     @staticmethod
-    def delete_column_in_file(file_type, dataset, target_file, col_idx, last_load_opts):
+    def delete_columns_in_file(file_type, dataset, target_file, col_indices, last_load_opts):
+        indices_set = set(col_indices)
         # --- FIXED: NATIVE HDF5 INTERCEPT ---
         if file_type == "HDF5":
             import h5py
@@ -401,16 +402,19 @@ class FileEditor:
                 try: dataset.file.close()
                 except: pass
             with h5py.File(target_file, 'a') as f:
-                col_name = dataset.column_names.get(col_idx)
-                if not col_name: return
+                col_names = [dataset.column_names.get(i) for i in col_indices]
+                col_names = [n for n in col_names if n]
+                if not col_names: return
                 
                 groups = [k for k in f.keys() if isinstance(f[k], h5py.Group)]
                 if not groups:
-                    if col_name in f: del f[col_name]
+                    for n in col_names:
+                        if n in f: del f[n]
                 else:
                     for grp_name in groups:
                         grp = f[grp_name]
-                        if col_name in grp: del grp[col_name]
+                        for n in col_names:
+                            if n in grp: del grp[n]
             return
         # ----------------------------------
 
@@ -434,8 +438,7 @@ class FileEditor:
                         continue
 
                     parts = next(csv.reader([line], delimiter=delim))
-                    if col_idx < len(parts):
-                        parts.pop(col_idx)
+                    parts = [p for i, p in enumerate(parts) if i not in indices_set]
 
                     temp = io.StringIO()
                     csv.writer(temp, delimiter=delim).writerow(parts)
@@ -463,8 +466,7 @@ class FileEditor:
                     continue
 
                 parts = next(csv.reader([line], delimiter=delim))
-                if col_idx < len(parts):
-                    parts.pop(col_idx)
+                parts = [p for i, p in enumerate(parts) if i not in indices_set]
 
                 temp = io.StringIO()
                 csv.writer(temp, delimiter=delim).writerow(parts)
@@ -474,21 +476,9 @@ class FileEditor:
                 f.write("\n".join(out) + "\n")
 
         else:
-            num_out = getattr(dataset, 'num_outputs', 0)
-            num_inp = getattr(dataset, 'num_inputs', 0)
-            has_time = (len(dataset.column_names) > num_out + num_inp)
-
-            inst_idx = col_idx - 1 if has_time else col_idx
-            is_time = (inst_idx < 0)
-            is_output = (0 <= inst_idx < num_out)
-
-            enabled_names = [inst["name"] for inst in dataset.outputs] + [inst["name"] for inst in dataset.inputs]
-            target_name = None
-            if not is_time and 0 <= inst_idx < len(enabled_names):
-                target_name = enabled_names[inst_idx]
-
-            outputs_left = max(0, num_out - 1) if (not is_time and is_output) else num_out
-            inputs_left = max(0, num_inp - 1) if (not is_time and not is_output) else num_inp
+            # BadgerLoop
+            target_names = [dataset.column_names.get(i) for i in col_indices]
+            target_base_name = os.path.splitext(os.path.basename(target_file))[0]
 
             with open(target_file, "r", encoding='utf-8-sig', errors='ignore') as f:
                 lines = [l.rstrip('\r\n') for l in f.readlines()]
@@ -498,7 +488,6 @@ class FileEditor:
             in_inputs = False
             in_data = False
 
-            target_base_name = os.path.splitext(os.path.basename(target_file))[0]
             has_mirror_flag = any(re.search(r'(?i)Is\s+Mirror\s+File\s*:\s*Yes', l) for l in lines)
             flag_injected = False
 
@@ -514,14 +503,6 @@ class FileEditor:
                         out.append("")
                         flag_injected = True
 
-                if not is_time:
-                    if is_output and re.match(r'(?i)^\s*outputs?[\s:=]+(\d+)', line):
-                        out.append(re.sub(r'(\d+)', str(outputs_left), line, count=1))
-                        continue
-                    if not is_output and re.match(r'(?i)^\s*inputs?[\s:=]+(\d+)', line):
-                        out.append(re.sub(r'(\d+)', str(inputs_left), line, count=1))
-                        continue
-
                 if line.startswith("###OUTPUTS"):
                     in_outputs = True; in_inputs = False; in_data = False
                     out.append(line); continue
@@ -532,10 +513,10 @@ class FileEditor:
                     in_data = True; in_outputs = False; in_inputs = False
                     out.append(line); continue
 
-                if (in_outputs or in_inputs) and line.strip() and target_name:
+                if (in_outputs or in_inputs) and line.strip():
                     parts = line.split("\t", 1)
-                    if parts[0].strip() == target_name.strip():
-                        continue 
+                    if parts[0].strip() in target_names:
+                        continue # Skip this header entirely!
 
                 if in_data and line.strip() and not line.startswith("###"):
                     if ':' in line and '\t' not in line:
@@ -543,8 +524,7 @@ class FileEditor:
                         continue
 
                     parts = line.split('\t')
-                    if col_idx < len(parts):
-                        parts.pop(col_idx)
+                    parts = [p for i, p in enumerate(parts) if i not in indices_set]
                     out.append("\t".join(parts))
                     continue
 

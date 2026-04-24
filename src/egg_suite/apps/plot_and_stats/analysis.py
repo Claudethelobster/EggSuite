@@ -1,4 +1,4 @@
-# ui/dialogs/analysis.py
+# apps/plot_and_stats/analysis.py
 import os
 import numpy as np
 import scipy.signal as sig
@@ -1618,41 +1618,58 @@ class SpectrogramDialog(QDialog):
 class DataSlicerDialog(QDialog):
     def __init__(self, main_window):
         super().__init__(main_window)
-        self.setWindowTitle("Data Slicer (Non-Monotonic Split)")
+        self.setWindowTitle("Data Slicer (Index/Point Range)")
         self.setMinimumWidth(450)
         self.main_window = main_window
-        dataset = main_window.dataset
+        dataset = main_window.current_dataset
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Split a column into two halves based on a threshold.\nPerfect for isolating non-monotonic calibration curves."))
+        layout.addWidget(QLabel("Slice data by row index (e.g., ignore the first 100 points of a sweep)."))
         layout.addSpacing(10)
 
         form = QFormLayout()
 
-        self.target_col = QComboBox()
-        self.cond_col = QComboBox()
-        for i, name in dataset.column_names.items():
-            self.target_col.addItem(f"{i}: {name}", i)
-            self.cond_col.addItem(f"{i}: {name}", i)
+        self.range_edit = QLineEdit("100:")
+        self.range_edit.setToolTip("Use Python slice syntax: '100:' (drops first 100), ':500' (keeps up to 500), '100:500'")
+        form.addRow("Point Range (Index):", self.range_edit)
 
-        # Pre-select based on current plot
-        try:
-            self.cond_col.setCurrentIndex(main_window.xcol.currentIndex())
-            self.target_col.setCurrentIndex(main_window.ycol.currentIndex())
-        except Exception: pass
+        self.sweep_mode = QComboBox()
+        self.sweep_mode.addItems(["All Sweeps", "Current Sweep", "Custom Range"])
+        self.sweep_custom = QLineEdit("0:5")
+        self.sweep_custom.setVisible(False)
+        self.sweep_mode.currentTextChanged.connect(lambda t: self.sweep_custom.setVisible(t == "Custom Range"))
 
-        form.addRow("Column to Split (Y):", self.target_col)
-        form.addRow("Condition Column (X):", self.cond_col)
+        sweep_lay = QHBoxLayout()
+        sweep_lay.addWidget(self.sweep_mode)
+        sweep_lay.addWidget(self.sweep_custom)
+        form.addRow("Apply to Sweeps:", sweep_lay)
 
-        thresh_lay = QHBoxLayout()
-        self.thresh_edit = QLineEdit("0.0")
-        self.grab_btn = QPushButton("📍 Grab from Crosshair")
-        self.grab_btn.clicked.connect(self.grab_crosshair)
-        thresh_lay.addWidget(self.thresh_edit)
-        thresh_lay.addWidget(self.grab_btn)
-
-        form.addRow("Threshold Value:", thresh_lay)
         layout.addLayout(form)
+
+        layout.addWidget(QLabel("<b>Columns to Slice:</b>"))
+        self.col_list = QListWidget()
+        self.col_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        for i, name in dataset.column_names.items():
+            item = QListWidgetItem(f"{i}: {name}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.col_list.addItem(item)
+        layout.addWidget(self.col_list)
+
+        btn_sel = QHBoxLayout()
+        btn_all = QPushButton("Select All")
+        btn_none = QPushButton("Select None")
+        btn_all.clicked.connect(lambda: [self.col_list.item(i).setCheckState(Qt.CheckState.Checked) for i in range(self.col_list.count())])
+        btn_none.clicked.connect(lambda: [self.col_list.item(i).setCheckState(Qt.CheckState.Unchecked) for i in range(self.col_list.count())])
+        btn_sel.addWidget(btn_all); btn_sel.addWidget(btn_none); btn_sel.addStretch()
+        layout.addLayout(btn_sel)
+
+        form2 = QFormLayout()
+        self.output_mode = QComboBox()
+        self.output_mode.addItems(["Generate Fresh File (Truncated Data)", "Append as New Columns (Pad with NaNs)"])
+        form2.addRow("Output Mode:", self.output_mode)
+        layout.addLayout(form2)
 
         btn_box = QHBoxLayout()
         ok = QPushButton("Slice Data")
@@ -1664,15 +1681,15 @@ class DataSlicerDialog(QDialog):
         ok.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
 
-    def grab_crosshair(self):
-        if hasattr(self.main_window, 'vLine') and self.main_window.vLine.isVisible():
-            # Grab the X-coordinate of the vertical crosshair line
-            val = self.main_window.vLine.value()
-            self.thresh_edit.setText(f"{val:.6g}")
-
     def get_result(self):
-        target_idx = self.target_col.currentData()
-        cond_idx = self.cond_col.currentData()
-        try: thresh = float(self.thresh_edit.text())
-        except ValueError: thresh = 0.0
-        return target_idx, cond_idx, thresh, self.target_col.currentText().split(": ")[-1]
+        sel_cols = []
+        for i in range(self.col_list.count()):
+            if self.col_list.item(i).checkState() == Qt.CheckState.Checked:
+                sel_cols.append(self.col_list.item(i).data(Qt.ItemDataRole.UserRole))
+        return (
+            self.range_edit.text().strip(),
+            self.sweep_mode.currentText(),
+            self.sweep_custom.text().strip(),
+            sel_cols,
+            self.output_mode.currentText()
+        )

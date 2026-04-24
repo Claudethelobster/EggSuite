@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTextEdit, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
     QFormLayout, QComboBox, QLineEdit, QWidget, QCheckBox, QTabWidget, QGroupBox,
-    QTableView, QScrollArea, QMessageBox, QSpinBox, QListWidget
+    QTableView, QScrollArea, QMessageBox, QSpinBox, QListWidget, QListWidgetItem
 )
 
 from core.constants import PHYSICS_CONSTANTS
@@ -250,17 +250,24 @@ class ManageColumnsDialog(QDialog):
         
         # --- TAB 2: DELETE ---
         self.tab_delete = QWidget()
-        form_delete = QFormLayout(self.tab_delete)
-        form_delete.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form_delete = QVBoxLayout(self.tab_delete)
         
-        self.delete_combo = QComboBox()
+        lbl = QLabel("Select columns to delete:")
+        form_delete.addWidget(lbl)
+        
+        self.delete_list = QListWidget()
+        self.delete_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         for idx, name in dataset.column_names.items():
-            self.delete_combo.addItem(f"{idx}: {name}", idx)
+            item = QListWidgetItem(f"{idx}: {name}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, idx)
+            self.delete_list.addItem(item)
             
-        form_delete.addRow("Column to delete:", self.delete_combo)
-        warning_lbl = QLabel(f"<br><b style='color: {theme.danger_text};'>Warning: Deleting a column is irreversible!</b>")
+        form_delete.addWidget(self.delete_list)
+        warning_lbl = QLabel(f"<b style='color: {theme.danger_text};'>Warning: Deletion is irreversible!</b>")
         warning_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        form_delete.addRow("", warning_lbl)
+        form_delete.addWidget(warning_lbl)
         self.tab_delete.setLayout(form_delete)
         
         self.tabs.addTab(self.tab_rename, "Rename")
@@ -309,7 +316,121 @@ class ManageColumnsDialog(QDialog):
         if self.tabs.currentIndex() == 0:
             return "rename", self.rename_combo.currentData(), self.new_name_edit.text().strip()
         else:
-            return "delete", self.delete_combo.currentData(), None
+            cols = []
+            for i in range(self.delete_list.count()):
+                if self.delete_list.item(i).checkState() == Qt.CheckState.Checked:
+                    cols.append(self.delete_list.item(i).data(Qt.ItemDataRole.UserRole))
+            return "delete", cols, None
+
+class PiecewisePropagationDialog(QDialog):
+    def __init__(self, dataset, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Piecewise Calibration Converter")
+        self.resize(600, 500)
+        self.dataset = dataset
+        
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Non-Monotonic Sensor Calibration</b><br>Splice two fit equations together based on a condition (e.g. Time or Index)."))
+        layout.addSpacing(10)
+        
+        form = QFormLayout()
+        self.new_name_edit = QLineEdit("Temperature (K)")
+        form.addRow("<b>New Column Name:</b>", self.new_name_edit)
+        
+        self.input_col = QComboBox()
+        self.cond_col = QComboBox()
+        self.cond_col.addItem("-1: Point Index (Row Number)", -1)
+        for i, name in dataset.column_names.items():
+            self.input_col.addItem(f"{i}: {name}", i)
+            self.cond_col.addItem(f"{i}: {name}", i)
+            
+        form.addRow("<b>Input Variable (X):</b>", self.input_col)
+        form.addRow("<b>Disambiguation Condition:</b>", self.cond_col)
+        
+        self.thresh_edit = QLineEdit("0.0")
+        form.addRow("<b>Threshold Value:</b>", self.thresh_edit)
+        layout.addLayout(form)
+        
+        layout.addWidget(QLabel("<hr>"))
+        
+        # Region A
+        layout.addWidget(QLabel("<b>Region A (Condition <= Threshold)</b>"))
+        lay_a = QHBoxLayout()
+        self.eq_a_edit = QLineEdit()
+        self.eq_a_edit.setPlaceholderText("e.g. 1.2 * exp(0.5 * x) + 3")
+        btn_load_a = QPushButton("📂 Load Fit File")
+        btn_load_a.clicked.connect(lambda: self._load_fit(self.eq_a_edit))
+        lay_a.addWidget(self.eq_a_edit)
+        lay_a.addWidget(btn_load_a)
+        layout.addLayout(lay_a)
+        
+        # Region B
+        layout.addWidget(QLabel("<b>Region B (Condition > Threshold)</b>"))
+        lay_b = QHBoxLayout()
+        self.eq_b_edit = QLineEdit()
+        self.eq_b_edit.setPlaceholderText("e.g. -0.5 * x**2 + 10")
+        btn_load_b = QPushButton("📂 Load Fit File")
+        btn_load_b.clicked.connect(lambda: self._load_fit(self.eq_b_edit))
+        lay_b.addWidget(self.eq_b_edit)
+        lay_b.addWidget(btn_load_b)
+        layout.addLayout(lay_b)
+        
+        layout.addStretch()
+        
+        btn_box = QHBoxLayout()
+        calc_btn = QPushButton("Calculate & Save")
+        calc_btn.setStyleSheet(f"font-weight: bold; color: {theme.primary_text}; padding: 6px;")
+        calc_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_box.addStretch()
+        btn_box.addWidget(cancel_btn)
+        btn_box.addWidget(calc_btn)
+        layout.addLayout(btn_box)
+        
+    def _load_fit(self, target_edit):
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        fname, _ = QFileDialog.getOpenFileName(self, "Load Fit File", "", "Text files (*.txt)")
+        if not fname: return
+        
+        try:
+            with open(fname, 'r') as f:
+                lines = [l.strip() for l in f.readlines() if l.strip()]
+            
+            fit_type = lines[0].replace("3D: ", "")
+            if fit_type.lower() != "custom":
+                QMessageBox.warning(self, "Format Error", "The Piecewise tool currently only auto-parses 'Custom' fit files.\n\nPlease manually type the equation or save your fit as a Custom type.")
+                return
+                
+            raw_eq = lines[1]
+            p_names = [p.strip() for p in lines[2].split(',')]
+            
+            p_idx = 3
+            if len(lines) > 3 and lines[3].startswith("aux_cols:"):
+                p_idx = 4
+                
+            p_vals = []
+            for i in range(len(p_names)):
+                p_vals.append(lines[p_idx + i])
+                
+            for name, val in zip(p_names, p_vals):
+                raw_eq = raw_eq.replace(f"{{{name}}}", f"({val})")
+                
+            target_edit.setText(raw_eq)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to parse fit file:\n{e}")
+            
+    def get_result(self):
+        try: thresh = float(self.thresh_edit.text())
+        except: thresh = 0.0
+        return (
+            self.new_name_edit.text().strip(),
+            self.input_col.currentData(),
+            self.cond_col.currentData(),
+            thresh,
+            self.eq_a_edit.text().strip(),
+            self.eq_b_edit.text().strip()
+        )
 
 class FolderEditChoiceDialog(QDialog):
     def __init__(self, parent=None):
