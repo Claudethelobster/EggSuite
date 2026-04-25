@@ -2589,9 +2589,11 @@ class BadgerLoopQtGraph(QMainWindow):
                         
                     data_dict = {idx: arr[:, idx] for idx in set(used_indices)}
                     index_arr = np.arange(arr.shape[0])
+                    x_idx = max(0, self.xcol.currentIndex())
+                    x_data = np.asarray(arr[:, x_idx], dtype=np.float64)
                     
                     # Inject norm_func into the math environment!
-                    env = {"np": np, "data_dict": data_dict, "e": np.e, "pi": np.pi, "index": index_arr, "norm": norm_func}
+                    env = {"np": np, "data_dict": data_dict, "e": np.e, "pi": np.pi, "index": index_arr, "norm": norm_func, "x": x_data}
                     result = eval(py_equation, {"__builtins__": {}}, env)
                     
                     if not isinstance(result, np.ndarray):
@@ -2644,55 +2646,123 @@ class BadgerLoopQtGraph(QMainWindow):
         opts = getattr(self, 'last_load_opts', {})
         FileEditor.delete_columns_in_file(self.file_type, self.dataset, target_file, col_indices, opts)
 
-    def _execute_universal_fit(self, base_model, param_names, param_config, x, y):
+    def _execute_universal_fit(self, base_model, param_names, param_config, x, y, y_err=None, x_err=None, algorithm="Auto"):
         free_params = []
         fixed_params = {}
         p0 = []
-        
+
         for p in param_names:
             if param_config[p]["mode"] == "Auto":
                 free_params.append(p)
                 p0.append(float(param_config[p]["value"]))
             else:
                 fixed_params[p] = float(param_config[p]["value"])
-        
+
         if not free_params:
             return [param_config[p]["value"] for p in param_names], None
-            
-        def dynamic_wrapper(x_val, *args):
-            kwargs = dict(fixed_params)
-            for name, val in zip(free_params, args):
-                kwargs[name] = val
-            full_args = [kwargs[p] for p in param_names]
-            return base_model(x_val, *full_args)
-            
-        from scipy.optimize import curve_fit
+
         import warnings
-        
+        import numpy as np
+
+        final_params = []
+        pcov = None
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # Extract parameters and the raw covariance matrix
-            popt, pcov = curve_fit(dynamic_wrapper, x, y, p0=p0, maxfev=20000)
-            
-        final_params = []
-        popt_idx = 0
 
+            use_odr = False
+            use_weights = True
+            robust_loss = 'linear'
+
+            if "Auto" in algorithm:
+                use_odr = x_err is not None and np.any(x_err > 0)
+            elif "Orthogonal" in algorithm or "ODR" in algorithm:
+                use_odr = True
+            elif "Unweighted" in algorithm or "Ignore Errors" in algorithm:
+                use_odr = False
+                use_weights = False
+            elif "Robust" in algorithm:
+                use_odr = False
+                robust_loss = 'soft_l1'
+            else:
+                use_odr = False
+
+            if use_odr:
+                from scipy.odr import ODR, Model, RealData
+
+                def odr_wrapper(B, x_val):
+                    kwargs = dict(fixed_params)
+                    for name, val in zip(free_params, B):
+                        kwargs[name] = val
+                    full_args = [kwargs[p] for p in param_names]
+                    return base_model(x_val, *full_args)
+
+                safe_x_err = np.where(x_err > 0, x_err, 1e-10) if (x_err is not None and use_weights) else None
+                safe_y_err = np.where(y_err > 0, y_err, 1e-10) if (y_err is not None and use_weights) else None
+
+                model = Model(odr_wrapper)
+                data = RealData(x, y, sx=safe_x_err, sy=safe_y_err)
+                odr = ODR(data, model, beta0=p0, maxit=2000)
+                out = odr.run()
+
+                popt = out.beta
+                pcov = out.cov_beta
+            else:
+                from scipy.optimize import curve_fit
+
+                def dynamic_wrapper(x_val, *args):
+                    kwargs = dict(fixed_params)
+                    for name, val in zip(free_params, args):
+                        kwargs[name] = val
+                    full_args = [kwargs[p] for p in param_names]
+                    return base_model(x_val, *full_args)
+
+                fit_kwargs = {'p0': p0, 'maxfev': 20000}
+                if robust_loss != 'linear':
+                    fit_kwargs['loss'] = robust_loss
+                    fit_kwargs['method'] = 'trf' # TRF is strictly required for robust loss functions
+
+                try:
+                    if use_weights and y_err is not None and np.any(y_err > 0):
+                        safe_err = np.where(y_err > 0, y_err, np.inf)
+                        popt, pcov = curve_fit(dynamic_wrapper, x, y, sigma=safe_err, absolute_sigma=True, **fit_kwargs)
+                    else:
+                        popt, pcov = curve_fit(dynamic_wrapper, x, y, **fit_kwargs)
+                except ValueError:
+                    # Failsafe: if the robust loss algorithm rejects the bounds or data, fall back to standard least squares
+                    if use_weights and y_err is not None and np.any(y_err > 0):
+                        safe_err = np.where(y_err > 0, y_err, np.inf)
+                        popt, pcov = curve_fit(dynamic_wrapper, x, y, sigma=safe_err, absolute_sigma=True, p0=p0, maxfev=20000)
+                    else:
+                        popt, pcov = curve_fit(dynamic_wrapper, x, y, p0=p0, maxfev=20000)
+
+        popt_idx = 0
         for p in param_names:
             if p in free_params:
                 final_params.append(popt[popt_idx])
                 popt_idx += 1
             else:
                 final_params.append(fixed_params[p])
-                
-        # Return ONLY the parameters and raw covariance. Heavy maths waits for the button!
+
         return final_params, pcov
     
     def _launch_common_fit_pipeline(self, func_type, degree_text, log_base_text, param_config):
-        res = self._get_all_plotted_xy(apply_selection=True)
-        if len(res) < 4 or len(res[0]) == 0: return
-        x, y, _, pair = res
+        row = max(0, self.series_list.currentRow())
+        pair = self.series_data.get(self.plot_mode, [{}])[row] if self.series_data.get(self.plot_mode) else {}
+        x_err_idx = pair.get('x_err', -1)
+        y_err_idx = pair.get('y_err', -1)
 
-        # 1. Setup the discrete percentage bar
+        aux = []
+        if x_err_idx >= 0: aux.append(x_err_idx)
+        if y_err_idx >= 0: aux.append(y_err_idx)
+
+        res = self._get_all_plotted_xy(apply_selection=True, aux_cols=aux)
+        if len(res) < 4 or len(res[0]) == 0: return
+        x, y, aux_dict, pair = res
+
+        x_err = aux_dict.get(x_err_idx) if x_err_idx >= 0 else None
+        y_err = aux_dict.get(y_err_idx) if y_err_idx >= 0 else None
+
         from PyQt6.QtWidgets import QProgressDialog
         self.progress_dlg = QProgressDialog(f"Fitting {func_type}...", "Cancel", 0, 100, self)
         self.progress_dlg.setWindowTitle("Processing")
@@ -2700,22 +2770,16 @@ class BadgerLoopQtGraph(QMainWindow):
         self.progress_dlg.setMinimumDuration(0) 
         self.progress_dlg.setValue(0)
 
-        # 2. Setup the Worker
         from apps.plot_and_stats.fitting import CommonFitWorker
-        
-        self.common_worker = CommonFitWorker(func_type, degree_text, log_base_text, param_config, x, y)
+        self.common_worker = CommonFitWorker(func_type, degree_text, log_base_text, param_config, x, y, y_err, x_err)
         self.common_worker.progress.connect(lambda val, txt: (self.progress_dlg.setValue(val), self.progress_dlg.setLabelText(txt)))
 
         def on_success(fit_res):
             self.progress_dlg.setValue(99)
-            
             import pyqtgraph as pg
             from PyQt6.QtCore import Qt
-            
-            # Handle dark mode colours
+
             fit_colour = "w" if self.bg_color_combo.currentText() == "Black" else "k"
-            
-            # --- FIX: Use PlotCurveItem directly to enable hardware clipping ---
             plot_item = pg.PlotCurveItem(
                 x=fit_res["xfit"], y=fit_res["yfit"], 
                 pen=pg.mkPen(fit_colour, width=2, style=Qt.PenStyle.DashLine),
@@ -2723,22 +2787,19 @@ class BadgerLoopQtGraph(QMainWindow):
                 autoDownsample=True
             )
             self.plot_widget.addItem(plot_item)
-            # -----------------------------------------------------------------
-            
-            fit_name = f"{fit_res['display_name']} ➔ {pair['y_name']}"
+
+            fit_name = f"{fit_res['display_name']} ➔ {pair.get('y_name', 'Y')}"
             self.fit_legend.addItem(plot_item, fit_name)
 
             if not hasattr(self, 'active_fits'): self.active_fits = []
             x_raw, y_raw = self._get_raw_fit_coords(fit_res["xfit"], fit_res["yfit"])
-            
-            # Build the memory object
+
             active_data = {
                 "name": fit_name, "type": fit_res["type_key"], "params": fit_res["params"],
                 "callable": fit_res["callable"], "plot_item": plot_item,
                 "param_names": fit_res["param_names"], "param_config": param_config, 
-                "x_raw": x_raw, "y_raw": y_raw, "x_idx": pair['x']
+                "x_raw": x_raw, "y_raw": y_raw, "x_idx": pair.get('x', 0)
             }
-            # Add optionals
             for k in ["equation", "degree", "base", "coeffs", "stats", "param_errs", "pcov"]:
                 if k in fit_res: active_data[k] = fit_res[k]
 
@@ -2749,7 +2810,6 @@ class BadgerLoopQtGraph(QMainWindow):
             if hasattr(self, 'save_fit_col_btn'): self.save_fit_col_btn.setVisible(True)
             if hasattr(self, 'export_fit_csv_btn'): self.export_fit_csv_btn.setVisible(True)
 
-            # Annihilate the progress dialog ONLY when the plot is completely finished
             self.progress_dlg.setValue(100)
             self.progress_dlg.hide()
             self.progress_dlg.deleteLater()
@@ -2763,7 +2823,6 @@ class BadgerLoopQtGraph(QMainWindow):
         self.common_worker.finished.connect(on_success)
         self.common_worker.error.connect(on_error)
         self.progress_dlg.canceled.connect(self.common_worker.terminate)
-        
         self.common_worker.start()
 
     def open_fit_function_dialog(self):
@@ -4702,7 +4761,7 @@ class BadgerLoopQtGraph(QMainWindow):
     def show_function_details(self):
         active_list = getattr(self, 'active_3d_fits', []) if self.plot_mode == "3D" else getattr(self, 'active_fits', [])
         if not active_list: return
-        
+
         from PyQt6.QtWidgets import QDialog, QMessageBox, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QPushButton, QGroupBox, QCheckBox, QWidget
         from PyQt6.QtCore import Qt
         import numpy as np
@@ -4723,7 +4782,7 @@ class BadgerLoopQtGraph(QMainWindow):
         eq_str = fit.get("equation", "")
         coeff_str = ""
         math_style = "font-size: 20px; font-family: Cambria, serif; font-style: italic;"
-        
+
         from core.constants import GREEK_MAP
 
         if ftype == "Polynomial":
@@ -4753,7 +4812,6 @@ class BadgerLoopQtGraph(QMainWindow):
             display_eq = fit.get('html_equation', fit.get('equation', ''))
             eq_str = f"<span style='{math_style}'>y = {display_eq}</span>"
             coeff_str = "<br>".join([f"{GREEK_MAP.get(p, p)} = {v:.6e}" for p, v in zip(fit['param_names'], fit['params'])])
-        
         elif raw_type == "2D Polynomial":
             ftype = f"2D Polynomial (Degree {fit.get('degree', 1)})"
             eq_str = fit.get("equation", "")
@@ -4775,17 +4833,14 @@ class BadgerLoopQtGraph(QMainWindow):
         dlg.setWindowTitle(f"Function Details: {fit['name']}")
         dlg.setMinimumSize(500, 650) 
         layout = QVBoxLayout(dlg)
-        
+
         header_lbl = QLabel(f"<b style='font-size: 16px;'>Fit Type:</b> <span style='font-size: 16px;'>{ftype}</span>")
         layout.addWidget(header_lbl)
-        
+
         def create_scroll_box(title, html_content, text_colour):
             from PyQt6.QtWidgets import QGroupBox, QVBoxLayout, QTextBrowser
             group = QGroupBox(title)
-            group.setStyleSheet(f"""
-                QGroupBox {{ font-weight: bold; font-size: 14px; margin-top: 2.5ex; border: 1px solid {theme.border}; border-radius: 6px; }}
-                QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 10px; padding: 0 5px; color: {theme.primary_text}; }}
-            """)
+            group.setStyleSheet(f"QGroupBox {{ font-weight: bold; font-size: 14px; margin-top: 2.5ex; border: 1px solid {theme.border}; border-radius: 6px; }} QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 10px; padding: 0 5px; color: {theme.primary_text}; }}")
             box_layout = QVBoxLayout(group)
             box_layout.setContentsMargins(4, 14, 4, 4) 
             tb = QTextBrowser()
@@ -4797,7 +4852,7 @@ class BadgerLoopQtGraph(QMainWindow):
 
         layout.addWidget(create_scroll_box("Equation Form", eq_str, theme.fg))
         layout.addWidget(create_scroll_box("Calculated Coefficients", f"<span style='font-family: Consolas, monospace; font-size: 15px;'>{coeff_str}</span>", theme.fg))
-        
+
         def build_stats_html(s):
             html = f"<div style='font-family: Consolas, monospace;'>"
             html += f"<b>Degrees of Freedom:</b> {s.get('dof', 'N/A')}<br>"
@@ -4807,17 +4862,17 @@ class BadgerLoopQtGraph(QMainWindow):
             html += "<b>Standard Errors (&plusmn;):</b><br>"
             errs = s.get("param_errs", [])
             p_names = fit.get("param_names", [])
-            
+
             if not p_names and "coeffs" in fit:
                 p_names = [f"C{i}" for i in range(len(fit.get("coeffs", [])))]
-                
+
             for i, p_name in enumerate(p_names):
                 if i < len(errs):
                     err_val = f"{errs[i]:.5g}" if not np.isnan(errs[i]) else "N/A (Fixed/Loaded)"
                     html += f"{GREEK_MAP.get(p_name, p_name)}: {err_val}<br>"
             html += "</div>"
             return html
-            
+
         def build_band_toggle():
             if "band_std" in fit and fit["band_std"] is not None:
                 band_lay = QHBoxLayout()
@@ -4825,33 +4880,29 @@ class BadgerLoopQtGraph(QMainWindow):
                 band_cb.setStyleSheet(f"font-weight: bold; color: {theme.fg};")
                 has_band = "band_item" in fit and fit["band_item"] is not None
                 band_cb.setChecked(has_band)
-                
+
                 def toggle_band(checked):
                     import pyqtgraph as pg
                     if checked:
                         x_vis = fit["plot_item"].xData
                         y_vis = fit["plot_item"].yData
-                        
+
                         y_upper = y_vis + fit["band_std"]
                         y_lower = y_vis - fit["band_std"]
-                        
+
                         c_top = pg.PlotCurveItem(x_vis, y_upper, pen=None)
                         c_bot = pg.PlotCurveItem(x_vis, y_lower, pen=None)
                         self.plot_widget.addItem(c_top)
                         self.plot_widget.addItem(c_bot)
-                        
-                        # 1. Define distinct opacities for the canvas vs the legend
+
                         canvas_color = pg.mkColor(255, 0, 0, 60)
-                        
-                        
                         band_item = pg.FillBetweenItem(c_top, c_bot, brush=pg.mkBrush(canvas_color))
                         band_item.setZValue(-5)
-                        
+
                         self.plot_widget.addItem(band_item)
                         fit["band_item"] = band_item
                         fit["band_curves"] = (c_top, c_bot)
-                        
-                        # 2. Assign the high-opacity solid red to the legend proxy
+
                         proxy = pg.PlotDataItem(pen=None, symbol='s', symbolSize=14, symbolPen=None, symbolBrush=pg.mkBrush(255, 0, 0, 200))
                         self.fit_legend.addItem(proxy, "1σ Error Band")
                         fit["band_proxy"] = proxy
@@ -4865,7 +4916,7 @@ class BadgerLoopQtGraph(QMainWindow):
                             fit["band_item"] = None
                             fit["band_curves"] = None
                             fit["band_proxy"] = None
-                            
+
                 band_cb.stateChanged.connect(lambda: toggle_band(band_cb.isChecked()))
                 band_lay.addWidget(band_cb)
                 band_lay.addStretch()
@@ -4874,34 +4925,104 @@ class BadgerLoopQtGraph(QMainWindow):
                 return dummy
             return None
 
+        def build_param_legend_toggle():
+            lay = QHBoxLayout()
+            cb = QCheckBox("Show Parameter Values in Legend")
+            cb.setStyleSheet(f"font-weight: bold; color: {theme.fg};")
+            cb.setChecked(fit.get("show_params_in_legend", False))
+
+            def toggle_params(checked):
+                fit["show_params_in_legend"] = checked
+
+                base_name = fit["name"]
+                new_label = base_name
+
+                if checked:
+                    p_names = fit.get("param_names", [])
+                    p_vals = fit.get("params", [])
+                    if not p_names and "coeffs" in fit:
+                        p_names = [f"C{i}" for i in range(len(fit.get("coeffs", [])))]
+                        p_vals = fit.get("coeffs", [])
+
+                    stats = fit.get("stats")
+                    errs = stats.get("param_errs", []) if stats else []
+
+                    param_strings = []
+                    for i, p_name in enumerate(p_names):
+                        val_str = f"{p_vals[i]:.4g}" if i < len(p_vals) else "N/A"
+                        err_str = ""
+                        if i < len(errs) and not np.isnan(errs[i]):
+                            if "e" in val_str.lower():
+                                err_str = f" &plusmn; {errs[i]:.4g}"
+                            elif "." in val_str:
+                                dec = len(val_str.split(".")[1])
+                                err_str = f" &plusmn; {errs[i]:.{dec}f}"
+                            else:
+                                err_str = f" &plusmn; {int(round(errs[i]))}"
+                        param_strings.append(f"{GREEK_MAP.get(p_name, p_name)} = {val_str}{err_str}")
+
+                    if param_strings:
+                        new_label = base_name + "<br>" + "<br>".join(param_strings)
+
+                if hasattr(self, 'fit_legend') and self.fit_legend is not None:
+                    for sample, label_item in self.fit_legend.items:
+                        if getattr(label_item, 'base_name', label_item.text) == base_name or label_item.text.startswith(base_name):
+                            if not hasattr(label_item, 'base_name'):
+                                label_item.base_name = base_name
+
+                            import re
+                            html_text = re.sub(r'\^([\w\.\-]+)', r'<sup>\1</sup>', new_label)
+                            html_text = re.sub(r'_([\w\.\-]+)', r'<sub>\1</sub>', html_text)
+
+                            axis_colour = 'w' if self.bg_color_combo.currentText() == "Black" else 'k'
+                            label_item.setText(html_text, color=axis_colour)
+                            break
+
+                self.plot_widget.update()
+
+            cb.stateChanged.connect(lambda: toggle_params(cb.isChecked()))
+            lay.addWidget(cb)
+            lay.addStretch()
+            dummy = QWidget()
+            dummy.setLayout(lay)
+            return dummy, cb
+
+        toggles_lay = QVBoxLayout()
+        param_toggle_widget, param_cb = build_param_legend_toggle()
+
         if "stats" in fit and fit["stats"] is not None:
             layout.addWidget(create_scroll_box("Fit Diagnostics", build_stats_html(fit["stats"]), theme.success_text))
             bw = build_band_toggle()
-            if bw: layout.addWidget(bw)
-            
+            if bw: toggles_lay.addWidget(bw)
+            toggles_lay.addWidget(param_toggle_widget)
+            layout.addLayout(toggles_lay)
+
         else:
+            toggles_lay.addWidget(param_toggle_widget)
+            layout.addLayout(toggles_lay)
+
             calc_btn = QPushButton("📊 Calculate Fit Statistics")
             calc_btn.setStyleSheet(f"font-weight: bold; background-color: {theme.primary_bg}; color: {theme.primary_text}; padding: 8px; border: 2px solid {theme.primary_border}; border-radius: 4px; margin-top: 10px;")
             layout.addWidget(calc_btn)
-            
+
             def run_lazy_stats():
                 calc_btn.setEnabled(False)
                 calc_btn.setText("Evaluating Dataset...")
-                
+
                 from PyQt6.QtWidgets import QProgressDialog
                 from apps.plot_and_stats.fitting import calculate_fit_statistics
-                
+
                 dlg.stat_prog = QProgressDialog("Calculating standard errors and variance...", None, 0, 0, dlg)
                 dlg.stat_prog.setWindowTitle("Heavy Calculation")
                 dlg.stat_prog.setModal(True)
                 dlg.stat_prog.setCancelButton(None)
                 dlg.stat_prog.show()
                 QApplication.processEvents()
-                
+
                 def heavy_math():
                     y_data = None; y_calc = None
                     mode = getattr(self, 'plot_mode', '2D')
-                    
+
                     if mode == "2D":
                         res = self._get_all_plotted_xy(apply_selection=False, aux_cols=fit.get("aux_cols", []))
                         if len(res) >= 4 and len(res[0]) > 0:
@@ -4912,9 +5033,9 @@ class BadgerLoopQtGraph(QMainWindow):
                                 pcov = fit.get("pcov")
                                 popt = fit.get("params")
                                 ftype = fit.get("type", "").lower()
-                                
+
                                 xfit = fit["plot_item"].xData 
-                                
+
                                 if xfit is not None and pcov is not None and not np.isnan(pcov).all() and not np.isinf(pcov).all():
                                     base_model = None
                                     if ftype == "polynomial":
@@ -4939,33 +5060,33 @@ class BadgerLoopQtGraph(QMainWindow):
                                         for mf in math_funcs:
                                             py_eq = re.sub(r'\b' + mf + r'\s*\(', f'np.{mf}(', py_eq, flags=re.IGNORECASE)
                                         py_eq = re.sub(r'\bln\s*\(', 'np.log(', py_eq, flags=re.IGNORECASE)
-                                        
+
                                         safe_aux = {c: np.zeros_like(xfit) for c in aux_cols}
-                                        
+
                                         def norm_func(v):
                                             arr = np.asarray(v, dtype=np.float64)
                                             m = np.max(np.abs(arr))
                                             return arr / m if m != 0 else arr
-                                            
+
                                         def base_model(x_val, *args):
                                             env = {"np": np, "e": np.e, "pi": np.pi, "x": x_val, "data_dict": safe_aux, "norm": norm_func}
                                             for i, pn in enumerate(p_names): env[pn] = args[i]
                                             res_arr = np.asarray(eval(py_eq, {"__builtins__": {}}, env), dtype=np.float64)
                                             if res_arr.ndim == 0: res_arr = np.full_like(x_val, float(res_arr))
                                             return res_arr
-                                            
+
                                     if base_model is not None:
                                         try:
                                             free_idx = [i for i, p in enumerate(fit.get("param_names", [])) if fit.get("param_config", {}).get(p, {}).get("mode", "Auto") == "Auto"]
                                             if not free_idx: free_idx = list(range(len(popt)))
                                             free_popt = [popt[i] for i in free_idx]
-                                            
+
                                             if len(free_popt) == pcov.shape[0]:
                                                 f_samples = np.random.multivariate_normal(free_popt, pcov, 300)
                                             else:
                                                 stds = np.sqrt(np.abs(np.diag(pcov)))
                                                 f_samples = np.random.normal(loc=free_popt, scale=stds, size=(300, len(free_popt)))
-                                                
+
                                             samples = []
                                             for fs in f_samples:
                                                 s_full = list(popt)
@@ -4973,7 +5094,7 @@ class BadgerLoopQtGraph(QMainWindow):
                                                 samples.append(s_full)
                                         except ValueError:
                                             samples = [popt for _ in range(300)]
-                                            
+
                                         y_samples = np.array([base_model(xfit, *s_popt) for s_popt in samples])
                                         fit["band_std"] = np.nanstd(y_samples, axis=0)
                             except Exception as e: print(f"Band Error: {e}")
@@ -4989,7 +5110,7 @@ class BadgerLoopQtGraph(QMainWindow):
                                     pts_list.append(np.column_stack((X.flatten(), Y.flatten(), grid_z)))
                                 else:
                                     pts_list.append(item[2])
-                                    
+
                             if pts_list:
                                 all_pts = np.vstack(pts_list)
                                 pts = all_pts[np.isfinite(all_pts).all(axis=1)]
@@ -5002,27 +5123,31 @@ class BadgerLoopQtGraph(QMainWindow):
                         param_count = len(fit.get("params", []))
                         return calculate_fit_statistics(y_data, y_calc, fit.get("pcov"), param_count)
                     return None
-                    
+
                 dlg.stat_worker = BackgroundWorker(heavy_math)
-                
+
                 def on_success(new_stats):
                     dlg.stat_prog.accept()
                     if new_stats:
                         fit["stats"] = new_stats
                         new_box = create_scroll_box("Fit Diagnostics", build_stats_html(new_stats), theme.success_text)
                         layout.insertWidget(layout.indexOf(calc_btn), new_box)
-                        
+
                         bw = build_band_toggle()
-                        if bw: layout.insertWidget(layout.indexOf(calc_btn), bw)
-                        
+                        if bw: toggles_lay.insertWidget(0, bw)
+
                         calc_btn.hide()
                         calc_btn.deleteLater()
+
+                        if fit.get("show_params_in_legend"):
+                            fit["show_params_in_legend"] = False
+                            param_cb.setChecked(True)
                     else:
                         calc_btn.setText("Error: Could not calculate")
-                        
+
                 dlg.stat_worker.finished.connect(on_success)
                 dlg.stat_worker.start()
-                
+
             calc_btn.clicked.connect(run_lazy_stats)
 
         btn_box = QHBoxLayout()
@@ -5031,7 +5156,7 @@ class BadgerLoopQtGraph(QMainWindow):
         close_btn.setStyleSheet(f"font-weight: bold; color: {theme.primary_text}; padding: 6px 15px;")
         close_btn.clicked.connect(dlg.accept)
         btn_box.addWidget(close_btn)
-        
+
         layout.addLayout(btn_box)
         dlg.exec()
 

@@ -397,24 +397,36 @@ class PiecewisePropagationDialog(QDialog):
             with open(fname, 'r') as f:
                 lines = [l.strip() for l in f.readlines() if l.strip()]
             
-            fit_type = lines[0].replace("3D: ", "")
-            if fit_type.lower() != "custom":
-                QMessageBox.warning(self, "Format Error", "The Piecewise tool currently only auto-parses 'Custom' fit files.\n\nPlease manually type the equation or save your fit as a Custom type.")
-                return
-                
-            raw_eq = lines[1]
-            p_names = [p.strip() for p in lines[2].split(',')]
-            
-            p_idx = 3
-            if len(lines) > 3 and lines[3].startswith("aux_cols:"):
-                p_idx = 4
-                
-            p_vals = []
-            for i in range(len(p_names)):
-                p_vals.append(lines[p_idx + i])
-                
-            for name, val in zip(p_names, p_vals):
-                raw_eq = raw_eq.replace(f"{{{name}}}", f"({val})")
+            fit_type = lines[0].replace("3D: ", "").lower()
+            if fit_type == "custom":
+                raw_eq = lines[1]
+                p_names = [p.strip() for p in lines[2].split(',')]
+                p_idx = 3
+                if len(lines) > 3 and lines[3].startswith("aux_cols:"): p_idx = 4
+                for i, name in enumerate(p_names):
+                    raw_eq = raw_eq.replace(f"{{{name}}}", f"({lines[p_idx + i]})")
+            elif fit_type == "polynomial":
+                deg = int(lines[1].split(":")[1].strip())
+                coeffs = lines[2:2+deg+1]
+                terms = []
+                for i, c in enumerate(coeffs):
+                    power = deg - i
+                    if power == 0: terms.append(f"({c})")
+                    elif power == 1: terms.append(f"({c}) * x")
+                    else: terms.append(f"({c}) * x^{power}")
+                raw_eq = " + ".join(terms)
+            elif fit_type == "logarithmic":
+                base = lines[1].split(":")[1].strip()
+                if base == "e": raw_eq = f"({lines[2]}) * ln(x) + ({lines[3]})"
+                else: raw_eq = f"({lines[2]}) * log(x)/log({base}) + ({lines[3]})"
+            elif fit_type == "exponential":
+                raw_eq = f"({lines[1]}) * exp(({lines[2]}) * x) + ({lines[3]})"
+            elif fit_type == "gaussian":
+                raw_eq = f"({lines[1]}) * exp(-(x - ({lines[2]}))^2 / (2 * ({lines[3]})^2))"
+            elif fit_type == "lorentzian":
+                raw_eq = f"({lines[1]}) / (1 + ((x - ({lines[2]})) / ({lines[3]}))^2)"
+            else:
+                raise ValueError(f"Unsupported fit type: {fit_type}")
                 
             target_edit.setText(raw_eq)
         except Exception as e:
@@ -801,6 +813,19 @@ class CreateColumnDialog(QDialog):
         math_lbl_layout.addWidget(self.const_btn)
         layout.addLayout(math_lbl_layout)
         
+        btn_layout2 = QHBoxLayout()
+        self.x_btn = QPushButton("x (Current X-Axis)")
+        self.x_btn.setStyleSheet("color: #d90000; font-weight: bold; border: 1px solid #d90000; padding: 4px 10px;")
+        self.x_btn.clicked.connect(self.insert_x_axis)
+        btn_layout2.addWidget(self.x_btn)
+        
+        self.load_fit_btn = QPushButton("📂 Load Fit File")
+        self.load_fit_btn.setStyleSheet(f"font-weight: bold; color: {theme.primary_text}; border: 1px solid {theme.primary_border}; padding: 4px 10px;")
+        self.load_fit_btn.clicked.connect(self.load_fit_file)
+        btn_layout2.addWidget(self.load_fit_btn)
+        btn_layout2.addStretch()
+        layout.addLayout(btn_layout2)
+        
         self.equation_input = QTextEdit()
         self.equation_input.setMaximumHeight(80)
         self.equation_input.textChanged.connect(self.update_preview)
@@ -826,6 +851,53 @@ class CreateColumnDialog(QDialog):
         btn_box.addWidget(self.calc_btn)
         btn_box.addWidget(cancel_btn)
         layout.addLayout(btn_box)
+
+    def insert_x_axis(self):
+        self.equation_input.textCursor().insertText("x")
+
+    def load_fit_file(self):
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import re
+        fname, _ = QFileDialog.getOpenFileName(self, "Load Fit File", "", "Text files (*.txt)")
+        if not fname: return
+        try:
+            with open(fname, 'r') as f:
+                lines = [l.strip() for l in f.readlines() if l.strip()]
+            
+            fit_type = lines[0].replace("3D: ", "").lower()
+            if fit_type == "custom":
+                raw_eq = lines[1]
+                p_names = [p.strip() for p in lines[2].split(',')]
+                p_idx = 3
+                if len(lines) > 3 and lines[3].startswith("aux_cols:"): p_idx = 4
+                for i, name in enumerate(p_names):
+                    raw_eq = raw_eq.replace(f"{{{name}}}", f"({lines[p_idx + i]})")
+            elif fit_type == "polynomial":
+                deg = int(lines[1].split(":")[1].strip())
+                coeffs = lines[2:2+deg+1]
+                terms = []
+                for i, c in enumerate(coeffs):
+                    power = deg - i
+                    if power == 0: terms.append(f"({c})")
+                    elif power == 1: terms.append(f"({c}) * x")
+                    else: terms.append(f"({c}) * x^{power}")
+                raw_eq = " + ".join(terms)
+            elif fit_type == "logarithmic":
+                base = lines[1].split(":")[1].strip()
+                if base == "e": raw_eq = f"({lines[2]}) * ln(x) + ({lines[3]})"
+                else: raw_eq = f"({lines[2]}) * log(x)/log({base}) + ({lines[3]})"
+            elif fit_type == "exponential":
+                raw_eq = f"({lines[1]}) * exp(({lines[2]}) * x) + ({lines[3]})"
+            elif fit_type == "gaussian":
+                raw_eq = f"({lines[1]}) * exp(-(x - ({lines[2]}))^2 / (2 * ({lines[3]})^2))"
+            elif fit_type == "lorentzian":
+                raw_eq = f"({lines[1]}) / (1 + ((x - ({lines[2]})) / ({lines[3]}))^2)"
+            else:
+                raise ValueError(f"Unsupported fit type: {fit_type}")
+                
+            self.equation_input.setPlainText(raw_eq)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to parse fit file:\n{e}")
 
     def generate_time_axis(self):
         if type(self.dataset).__name__ == 'CSVDataset' or not hasattr(self.dataset, 'settling_time'):
@@ -906,7 +978,7 @@ class CreateColumnDialog(QDialog):
         try:
             with np.errstate(all='ignore'):
                 # Inject norm into the test environment!
-                eval(py_equation, {"__builtins__": {}}, {"np": np, "data_dict": dummy_dict, "e": np.e, "pi": np.pi, "index": np.ones(1), "norm": norm_func})
+                eval(py_equation, {"__builtins__": {}}, {"np": np, "data_dict": dummy_dict, "e": np.e, "pi": np.pi, "index": np.ones(1), "norm": norm_func, "x": np.ones(1)})
             return True
         except Exception:
             return False
@@ -957,6 +1029,12 @@ class CreateColumnDialog(QDialog):
             return f"__INDEX{len(idx_vars)-1}__"
         html_text = re.sub(r'\bindex\b', idx_repl, html_text)
         
+        x_vars = []
+        def x_repl(m):
+            x_vars.append(f"<span style='color: #d90000; font-weight: bold; font-style: italic;'>x</span>")
+            return f"__XVAR{len(x_vars)-1}__"
+        html_text = re.sub(r'\bx\b', x_repl, html_text)
+        
         html_text = html_text.replace('*', '&middot;')
         html_text = html_text.replace('-', '&minus;')
         html_text = re.sub(r'\bpi\b', 'π', html_text) 
@@ -972,7 +1050,7 @@ class CreateColumnDialog(QDialog):
         html_text = re.sub(r'\b(arcsin|arccos|arctan|arcsinh|arccosh|arctanh|sinh|cosh|tanh|sin|cos|tan|ln|log(?:_?[0-9]+)?|abs|norm)\b', func_repl, html_text, flags=re.IGNORECASE)
 
         def tokenize_to_horizontal(text, f_size):
-            parts = re.split(r'(__COL\d+__|__FUNC\d+__|__PAREN\d+__|__EXP\d+__|__CONST\d+__|__INDEX\d+__)', text)
+            parts = re.split(r'(__COL\d+__|__FUNC\d+__|__PAREN\d+__|__EXP\d+__|__CONST\d+__|__INDEX\d+__|__XVAR\d+__)', text)
             row_html = "<table style='display:inline-table; border-collapse: collapse; margin: 0;'><tr>"
             for p in parts:
                 if not p: continue
@@ -987,7 +1065,7 @@ class CreateColumnDialog(QDialog):
             spacer      = "6px"  if is_exp else "10px"
             
             while True:
-                match = re.search(r'([a-zA-Zπ]+|[0-9\.]+|__COL\d+__|__PAREN\d+__|__FUNC\d+__|__EXP\d+__|__CONST\d+__|__INDEX\d+__)\s*\^\s*(-?[a-zA-Zπ]+|-?[0-9\.]+|__COL\d+__|__PAREN\d+__|__FUNC\d+__|__EXP\d+__|__CONST\d+__|__INDEX\d+__)', text)
+                match = re.search(r'([a-zA-Zπ]+|[0-9\.]+|__COL\d+__|__PAREN\d+__|__FUNC\d+__|__EXP\d+__|__CONST\d+__|__INDEX\d+__|__XVAR\d+__)\s*\^\s*(-?[a-zA-Zπ]+|-?[0-9\.]+|__COL\d+__|__PAREN\d+__|__FUNC\d+__|__EXP\d+__|__CONST\d+__|__INDEX\d+__|__XVAR\d+__)', text)
                 if not match: break
                 base, exp = match.group(1), match.group(2)
                 
@@ -1072,12 +1150,13 @@ class CreateColumnDialog(QDialog):
         html_text = process_math_block(html_text, is_exp=False, has_parens=False)
         
         for _ in range(15): 
-            if not re.search(r'__(EXP|PAREN|FUNC|COL|CONST|INDEX)\d+__', html_text): break
+            if not re.search(r'__(EXP|PAREN|FUNC|COL|CONST|INDEX|XVAR)\d+__', html_text): break
             for i in range(len(exps)): html_text = html_text.replace(f"__EXP{i}__", exps[i])
             for i in range(len(parens)): html_text = html_text.replace(f"__PAREN{i}__", parens[i])
             for i in range(len(funcs)): html_text = html_text.replace(f"__FUNC{i}__", funcs[i])
             for i in range(len(consts)): html_text = html_text.replace(f"__CONST{i}__", consts[i])
             for i in range(len(idx_vars)): html_text = html_text.replace(f"__INDEX{i}__", idx_vars[i])
+            for i in range(len(x_vars)): html_text = html_text.replace(f"__XVAR{i}__", x_vars[i])
             for i in range(len(cols)):
                 span = f"<span style='color: {theme.primary_text}; font-weight: bold;'>{cols[i]}</span>"
                 html_text = html_text.replace(f"__COL{i}__", span)

@@ -8,7 +8,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog, QMainWindow, QVBoxLayout, QHBoxLayout, QFormLayout,
     QComboBox, QLineEdit, QLabel, QPushButton, QTableWidget, QHeaderView,
-    QScrollArea, QWidget, QFileDialog, QMessageBox, QApplication, QTextEdit
+    QScrollArea, QWidget, QFileDialog, QMessageBox, QApplication, QTextEdit,
+    QTabWidget
 )
 
 from core.constants import PHYSICS_CONSTANTS, GREEK_MAP
@@ -299,7 +300,7 @@ class CommonFitWorker(QThread):
     progress = pyqtSignal(int, str)
     error = pyqtSignal(str)
 
-    def __init__(self, func_type, degree_text, log_base_text, param_config, x, y):
+    def __init__(self, func_type, degree_text, log_base_text, param_config, x, y, y_err=None, x_err=None):
         super().__init__()
         self.func_type = func_type
         self.degree_text = degree_text
@@ -307,16 +308,16 @@ class CommonFitWorker(QThread):
         self.param_config = param_config
         self.x = x
         self.y = y
+        self.y_err = y_err
+        self.x_err = x_err
 
     def run(self):
         try:
             import numpy as np
-            from scipy.optimize import curve_fit
             import warnings
-            
+
             self.progress.emit(10, f"Initialising {self.func_type} model...")
-            
-            # 1. Internal Universal Fitter
+
             def execute_fit(base_model, param_names):
                 free_params = []
                 fixed_params = {}
@@ -327,31 +328,52 @@ class CommonFitWorker(QThread):
                         p0.append(float(self.param_config[p]["value"]))
                     else:
                         fixed_params[p] = float(self.param_config[p]["value"])
-                
+
                 if not free_params:
-                    # If all parameters are fixed, return empty stats and zero errors
                     res["stats"] = None
                     res["param_errs"] = [0.0] * len(param_names)
-                    res["pcov"] = None # <--- ADD THIS
+                    res["pcov"] = None
                     return [self.param_config[p]["value"] for p in param_names]
-                    
-                def dynamic_wrapper(x_val, *args):
-                    kwargs = dict(fixed_params)
-                    for name, val in zip(free_params, args):
-                        kwargs[name] = val
-                    full_args = [kwargs[p] for p in param_names]
-                    return base_model(x_val, *full_args)
-                    
+
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    # --- FIX: Capture pcov ---
-                    popt, pcov = curve_fit(dynamic_wrapper, self.x, self.y, p0=p0, maxfev=20000)
-                    
+
+                    if self.x_err is not None and np.any(self.x_err > 0):
+                        from scipy.odr import ODR, Model, RealData
+                        def odr_wrapper(B, x_val):
+                            kwargs = dict(fixed_params)
+                            for name, val in zip(free_params, B):
+                                kwargs[name] = val
+                            full_args = [kwargs[p] for p in param_names]
+                            return base_model(x_val, *full_args)
+
+                        safe_x_err = np.where(self.x_err > 0, self.x_err, 1e-10)
+                        safe_y_err = np.where(self.y_err > 0, self.y_err, 1e-10) if self.y_err is not None else None
+
+                        model = Model(odr_wrapper)
+                        data = RealData(self.x, self.y, sx=safe_x_err, sy=safe_y_err)
+                        odr = ODR(data, model, beta0=p0, maxit=2000)
+                        out = odr.run()
+                        popt, pcov = out.beta, out.cov_beta
+                    else:
+                        from scipy.optimize import curve_fit
+                        def dynamic_wrapper(x_val, *args):
+                            kwargs = dict(fixed_params)
+                            for name, val in zip(free_params, args):
+                                kwargs[name] = val
+                            full_args = [kwargs[p] for p in param_names]
+                            return base_model(x_val, *full_args)
+
+                        if self.y_err is not None and np.any(self.y_err > 0):
+                            safe_err = np.where(self.y_err > 0, self.y_err, np.inf)
+                            popt, pcov = curve_fit(dynamic_wrapper, self.x, self.y, sigma=safe_err, absolute_sigma=True, p0=p0, maxfev=20000)
+                        else:
+                            popt, pcov = curve_fit(dynamic_wrapper, self.x, self.y, p0=p0, maxfev=20000)
+
                 final_params = []
                 full_param_errs = []
                 popt_idx = 0
-                
-                # Extract the uncertainties for the free parameters
+
                 free_errs = []
                 if pcov is not None and not np.isinf(pcov).all() and not np.isnan(pcov).all():
                     try: free_errs = np.sqrt(np.diag(pcov)).tolist()
@@ -366,36 +388,34 @@ class CommonFitWorker(QThread):
                         popt_idx += 1
                     else:
                         final_params.append(fixed_params[p])
-                        full_param_errs.append(0.0) # Fixed parameters have 0 uncertainty
-                
-                # Defer the heavy stats, but keep the covariance errors
+                        full_param_errs.append(0.0)
+
                 res["stats"] = None
                 res["param_errs"] = full_param_errs 
-                res["pcov"] = pcov # <--- ADD THIS
-                
+                res["pcov"] = pcov
+
                 return final_params
 
             self.progress.emit(25, "Setting up mathematical equations...")
 
-            # 2. Define the requested model
             res = {"type_key": self.func_type.lower()}
-            
+
             if self.func_type == "Polynomial":
                 degree = int(self.degree_text)
                 param_names = [f"c{i}" for i in range(degree + 1)]
-                
+
                 if all(self.param_config[p]["mode"] == "Auto" and self.param_config[p]["value"] == 1.0 for p in param_names):
                     with warnings.catch_warnings():
                         warnings.simplefilter('ignore')
                         smart_p0 = np.polyfit(self.x, self.y, degree)
                     for i, p in enumerate(param_names): self.param_config[p]["value"] = smart_p0[i]
-                        
+
                 def model(x_val, *args):
                     return sum(c * (x_val**(degree-i)) for i, c in enumerate(args))
-                
+
                 self.progress.emit(40, "Running non-linear optimiser...")
                 final_params = execute_fit(model, param_names)
-                
+
                 poly = np.poly1d(final_params)
                 res["callable"] = poly
                 res["equation"] = "y = " + " + ".join(f"{c:.3g}x^{i}" for i, c in enumerate(final_params[::-1]))
@@ -407,13 +427,13 @@ class CommonFitWorker(QThread):
                 base = np.e if self.log_base_text.lower() == "e" else float(self.log_base_text)
                 def model(x_val, a, c): return a * np.log(x_val) / np.log(base) + c
                 param_names = ["a", "c"]
-                
+
                 self.progress.emit(40, "Running non-linear optimiser...")
                 final_params = execute_fit(model, param_names)
                 res["callable"] = lambda v: model(v, *final_params)
                 res["display_name"] = "Logarithmic"
                 res["base"] = self.log_base_text
-                
+
             elif self.func_type == "Exponential":
                 def model(x_val, a, b, c): return a * np.exp(b * x_val) + c
                 param_names = ["a", "b", "c"]
@@ -421,14 +441,14 @@ class CommonFitWorker(QThread):
                 final_params = execute_fit(model, param_names)
                 res["callable"] = lambda v: model(v, *final_params)
                 res["display_name"] = "Exponential"
-                
+
             elif self.func_type == "Gaussian":
                 def model(x_val, A, mu, sigma): return A * np.exp(-(x_val - mu)**2 / (2 * sigma**2))
                 param_names = ["A", "mu", "sigma"]
-                
+
                 target_idx = np.argmax(self.y) if abs(self.y.max() - self.y.mean()) > abs(self.y.min() - self.y.mean()) else np.argmin(self.y)
                 peak_x = self.x[target_idx]
-                
+
                 if self.param_config["A"]["mode"] == "Auto" and self.param_config["A"]["value"] == 1.0: self.param_config["A"]["value"] = self.y.max()
                 if self.param_config["mu"]["mode"] == "Auto" and self.param_config["mu"]["value"] == 1.0: self.param_config["mu"]["value"] = peak_x
                 if self.param_config["sigma"]["mode"] == "Auto" and self.param_config["sigma"]["value"] == 1.0: self.param_config["sigma"]["value"] = np.std(self.x)
@@ -437,32 +457,35 @@ class CommonFitWorker(QThread):
                 final_params = execute_fit(model, param_names)
                 res["callable"] = lambda v: model(v, *final_params)
                 res["display_name"] = "Gaussian"
-                
+
             elif self.func_type == "Lorentzian":
                 def model(x_val, A, x0, gamma): return A / (1 + ((x_val - x0) / gamma)**2)
                 param_names = ["A", "x0", "gamma"]
-                
+
                 target_idx = np.argmax(self.y) if abs(self.y.max() - self.y.mean()) > abs(self.y.min() - self.y.mean()) else np.argmin(self.y)
                 peak_x = self.x[target_idx]
-                
+
                 if self.param_config["A"]["mode"] == "Auto" and self.param_config["A"]["value"] == 1.0: self.param_config["A"]["value"] = self.y.max()
                 if self.param_config["x0"]["mode"] == "Auto" and self.param_config["x0"]["value"] == 1.0: self.param_config["x0"]["value"] = peak_x
                 if self.param_config["gamma"]["mode"] == "Auto" and self.param_config["gamma"]["value"] == 1.0: self.param_config["gamma"]["value"] = np.std(self.x)
+
+                self.progress.emit(40, "Running non-linear optimiser...")
+                final_params = execute_fit(model, param_names)
+                res["callable"] = lambda v: model(v, *final_params)
+                res["display_name"] = "Lorentzian"
 
             # 3. Generate High-Res Curve
             self.progress.emit(80, "Generating high-resolution plot curve...")
             x_min = max(1e-15, self.x.min()) if self.func_type == "Logarithmic" else self.x.min()
             xfit = np.linspace(x_min, self.x.max(), 500)
-            
-            # Use the generated callable
+
             yfit = res["callable"](xfit)
-            
-            # Sanitize to prevent OpenGL/PyQtGraph crashes
+
             y_max, y_min = np.nanmax(self.y), np.nanmin(self.y)
             y_span = abs(y_max - y_min) or 1.0
             safe_max = y_max + (y_span * 50)
             safe_min = y_min - (y_span * 50)
-            
+
             yfit = np.nan_to_num(yfit, nan=0.0, posinf=safe_max, neginf=safe_min)
             yfit = np.clip(yfit, safe_min, safe_max)
 
@@ -471,9 +494,9 @@ class CommonFitWorker(QThread):
             res["yfit"] = yfit
             res["params"] = final_params
             res["param_names"] = param_names
-            
+
             self.finished.emit(res)
-            
+
         except Exception as e:
             self.error.emit(str(e))
 
@@ -493,26 +516,32 @@ class CustomFitDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("<b>1. Insert Variables & Columns:</b>"))
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        tab_main = QWidget()
+        layout_main = QVBoxLayout(tab_main)
+
+        layout_main.addWidget(QLabel("<b>1. Insert Variables & Columns:</b>"))
         btn_layout = QHBoxLayout()
-        
+
         btn_x = QPushButton("x (Independent Variable)")
         btn_x.setStyleSheet(f"color: {theme.danger_text}; font-weight: bold; border: 1px solid {theme.danger_border}; padding: 4px;")
         btn_x.clicked.connect(lambda: self.equation_input.textCursor().insertText("x"))
         btn_layout.addWidget(btn_x)
-        
+
         self.const_btn = QPushButton("✨ Physics Constants")
         self.const_btn.setStyleSheet(f"font-weight: bold; color: {theme.success_text}; border: 1px solid {theme.success_border}; padding: 4px;")
         self.const_btn.clicked.connect(self.open_constants)
         btn_layout.addWidget(self.const_btn)
-        layout.addLayout(btn_layout)
+        layout_main.addLayout(btn_layout)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setMaximumHeight(100)
         col_container = QWidget()
         col_grid = QFormLayout(col_container)
-        
+
         row_layout = QHBoxLayout()
         cols_in_row = 0
         for i, name in self.available_columns.items():
@@ -527,9 +556,9 @@ class CustomFitDialog(QDialog):
                 cols_in_row = 0
         if cols_in_row > 0: col_grid.addRow(row_layout)
         scroll.setWidget(col_container)
-        layout.addWidget(scroll)
+        layout_main.addWidget(scroll)
 
-        layout.addWidget(QLabel("<b>2. Create Parameters to Optimize:</b>"))
+        layout_main.addWidget(QLabel("<b>2. Create Parameters to Optimize:</b>"))
         param_creator_layout = QHBoxLayout()
         self.new_param_edit = QLineEdit()
         self.new_param_edit.setPlaceholderText("e.g. A, tau, omega, alpha")
@@ -537,64 +566,56 @@ class CustomFitDialog(QDialog):
         add_param_btn.clicked.connect(self.add_parameter)
         param_creator_layout.addWidget(self.new_param_edit)
         param_creator_layout.addWidget(add_param_btn)
-        layout.addLayout(param_creator_layout)
+        layout_main.addLayout(param_creator_layout)
 
-        # --- NEW: Vertical Scroll Area for Parameters ---
         self.param_scroll = QScrollArea()
         self.param_scroll.setWidgetResizable(True)
         self.param_scroll.setMinimumHeight(120) 
-        self.param_scroll.setMaximumHeight(200) # Stop it from taking over the screen
-        
+        self.param_scroll.setMaximumHeight(200)
+
         self.param_scroll_widget = QWidget()
         self.param_btn_layout = QVBoxLayout(self.param_scroll_widget)
         self.param_btn_layout.setAlignment(Qt.AlignmentFlag.AlignTop) 
-        
+
         self.param_scroll.setWidget(self.param_scroll_widget)
-        layout.addWidget(self.param_scroll)
-        # ------------------------------------------------
+        layout_main.addWidget(self.param_scroll)
 
         math_lbl_layout = QHBoxLayout()
         math_lbl_layout.addWidget(QLabel("<b>3. Equation:</b> <i>(+, -, *, /, ^, sin(), exp()...)</i>"))
         math_lbl_layout.addStretch()
-        
-        # --- NEW: Template Injector Dropdown ---
+
         self.template_combo = QComboBox()
         self.template_combo.addItems(["Template...", "Gaussian", "Lorentzian", "Sine Wave", "Nth Order Polynomial"])
         self.template_combo.activated.connect(self.apply_template)
         math_lbl_layout.addWidget(self.template_combo)
-        # ---------------------------------------
-        
+
         self.load_func_btn = QPushButton("📂 Load Saved Function")
         self.load_func_btn.setStyleSheet(f"font-weight: bold; color: {theme.primary_text}; padding: 4px 10px;")
         self.load_func_btn.clicked.connect(self.load_custom_function)
         math_lbl_layout.addWidget(self.load_func_btn)
-        
-        layout.addLayout(math_lbl_layout)
-        
+
+        layout_main.addLayout(math_lbl_layout)
+
         self.equation_input = QTextEdit()
-        # --- NEW: Horizontal scrolling for long equations ---
         self.equation_input.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap) 
         self.equation_input.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # ----------------------------------------------------
         self.equation_input.setMaximumHeight(80)
         self.equation_input.setFont(pg.QtGui.QFont("Consolas", 11))
         self.equation_input.textChanged.connect(self.update_preview)
-        layout.addWidget(self.equation_input)
+        layout_main.addWidget(self.equation_input)
 
         self.preview_label = QLabel()
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setStyleSheet(f"background-color: {theme.panel_bg}; color: {theme.fg}; border: 1px solid {theme.border}; font-size: 22px; font-family: Cambria, serif; font-style: italic; padding: 10px;")
-        
-        # --- NEW: Scroll Area for the Live Preview ---
+
         self.preview_scroll = QScrollArea()
         self.preview_scroll.setWidgetResizable(True)
-        self.preview_scroll.setWidget(self.preview_label) # <-- Fixed variable name
+        self.preview_scroll.setWidget(self.preview_label)
         self.preview_scroll.setMinimumHeight(100)
         self.preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        layout.addWidget(self.preview_scroll)
-        # ---------------------------------------------
+        layout_main.addWidget(self.preview_scroll)
 
-        layout.addWidget(QLabel("<b>4. Parameter Settings:</b>"))
+        layout_main.addWidget(QLabel("<b>4. Parameter Settings:</b>"))
         self.param_table = QTableWidget()
         self.param_table.setColumnCount(3)
         self.param_table.setHorizontalHeaderLabels(["Parameter", "Mode", "Value / Guess"])
@@ -602,49 +623,60 @@ class CustomFitDialog(QDialog):
         self.param_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.param_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.param_table.verticalHeader().setVisible(False)
-        layout.addWidget(self.param_table)
+        layout_main.addWidget(self.param_table)
 
-        # --- NEW INTERACTIVE BUTTONS ---
+        self.tabs.addTab(tab_main, "Equation & Parameters")
+
+        tab_errors = QWidget()
+        layout_errors = QFormLayout(tab_errors)
+
+        self.algorithm_combo = QComboBox()
+        self.algorithm_combo.addItems([
+            "Auto-Detect (Recommended)", 
+            "Unweighted Least Squares (Ignore Errors)",
+            "Weighted Least Squares (Y-Errors Only)", 
+            "Orthogonal Distance Regression (X & Y Errors)",
+            "Robust Least Squares (Ignore Outliers)"
+        ])
+        layout_errors.addRow("Fitting Algorithm:", self.algorithm_combo)
+
+        self.tabs.addTab(tab_errors, "Optimization Settings")
+
         btn_box = QHBoxLayout()
-        
-        # --- NEW INTERACTIVE BUTTONS ---
-        btn_box = QHBoxLayout()
-        
+
         self.auto_guess_btn = QPushButton("✨ Auto-Guess Values")
         self.auto_guess_btn.setStyleSheet(f"font-weight: bold; color: {theme.success_text}; padding: 6px;")
         self.auto_guess_btn.clicked.connect(self.run_auto_guess)
         self.auto_guess_btn.setEnabled(False) 
-        
+
         self.optimize_btn = QPushButton("Optimize Parameters")
         self.optimize_btn.setStyleSheet("font-weight: bold; padding: 6px;")
         self.optimize_btn.clicked.connect(self.run_optimization)
         self.optimize_btn.setEnabled(False)
-        
-        # --- FIX 2: ADD STOP BUTTON ---
+
         self.stop_opt_btn = QPushButton("⏹ Stop Optimization")
         self.stop_opt_btn.setStyleSheet(f"font-weight: bold; color: {theme.danger_text}; padding: 6px;")
         self.stop_opt_btn.clicked.connect(self.stop_optimization)
         self.stop_opt_btn.setVisible(False)
-        # ------------------------------
-        
+
         self.done_btn = QPushButton("Done")
         self.done_btn.setStyleSheet(f"font-weight: bold; color: {theme.primary_text}; padding: 6px;")
         self.done_btn.clicked.connect(self.handle_done)
         self.done_btn.setEnabled(False) 
-        
+
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
-        
+
         btn_box.addWidget(self.auto_guess_btn)
         btn_box.addWidget(self.optimize_btn)
-        btn_box.addWidget(self.stop_opt_btn) # Inserted into layout
+        btn_box.addWidget(self.stop_opt_btn)
         btn_box.addStretch()
         btn_box.addWidget(cancel_btn)
         btn_box.addWidget(self.done_btn)
         layout.addLayout(btn_box)
-        
+
         self.param_configs = {}
-        self._swarm_count = 0 # Tracks if we should use Global or Targeted bounds
+        self._swarm_count = 0
         
     def apply_template(self):
         template_name = self.template_combo.currentText()
@@ -1072,14 +1104,27 @@ class CustomFitDialog(QDialog):
 
     def _run_opt_step(self):
         if not getattr(self, '_is_optimizing', False): return
-            
+
         import numpy as np
-        res = self.parent_gui._get_all_plotted_xy(aux_cols=self.used_cols, apply_selection=True)
+
+        row = max(0, self.parent_gui.series_list.currentRow())
+        pair = self.parent_gui.series_data.get(self.parent_gui.plot_mode, [{}])[row] if self.parent_gui.series_data.get(self.parent_gui.plot_mode) else {}
+        x_err_idx = pair.get('x_err', -1)
+        y_err_idx = pair.get('y_err', -1)
+
+        cols_to_fetch = list(self.used_cols)
+        if x_err_idx >= 0 and x_err_idx not in cols_to_fetch: cols_to_fetch.append(x_err_idx)
+        if y_err_idx >= 0 and y_err_idx not in cols_to_fetch: cols_to_fetch.append(y_err_idx)
+
+        res = self.parent_gui._get_all_plotted_xy(aux_cols=cols_to_fetch, apply_selection=True)
         if len(res) < 4 or len(res[0]) == 0: 
             self.stop_optimization()
             return
-            
+
         x, y, aux_dict, _ = res
+        x_err = aux_dict.get(x_err_idx) if x_err_idx >= 0 else None
+        y_err = aux_dict.get(y_err_idx) if y_err_idx >= 0 else None
+
         safe_dict = aux_dict if aux_dict is not None else {}
         aux_calc = {c: np.asarray(safe_dict.get(c, np.zeros_like(x))) for c in self.used_cols}
 
@@ -1105,15 +1150,15 @@ class CustomFitDialog(QDialog):
             if res_arr.ndim == 0: res_arr = np.full_like(x_val, float(res_arr))
             res_arr[~np.isfinite(res_arr)] = 1e12 
             return res_arr
-            
-        # Spawn the thread
-        self.opt_worker = LocalWorker(self.parent_gui._execute_universal_fit, custom_model, self.parameters, param_config, x, y)
-        
+
+        algorithm_choice = self.algorithm_combo.currentText()
+        self.opt_worker = LocalWorker(self.parent_gui._execute_universal_fit, custom_model, self.parameters, param_config, x, y, y_err, x_err, algorithm_choice)
+
         def on_success(result):
             final_params, pcov = result
-            self.latest_pcov = pcov  # Save the raw matrix
+            self.latest_pcov = pcov  
             self._opt_cycles += 1
-            
+
             new_vals = []
             for i, p in enumerate(self.parameters):
                 if self.param_configs[p]["mode"].currentText() == "Auto":
@@ -1121,28 +1166,28 @@ class CustomFitDialog(QDialog):
                     self.param_configs[p]["val"].blockSignals(True)
                     self.param_configs[p]["val"].setText(f"{final_params[i]:.6g}")
                     self.param_configs[p]["val"].blockSignals(False)
-            
+
             self._draw_live_preview()
-            
-            # 1. Check for mathematical convergence
+
             if old_vals and np.allclose(old_vals, new_vals, rtol=1e-5):
                 self.stop_optimization()
+                from PyQt6.QtWidgets import QMessageBox
                 QMessageBox.information(self, "Optimization Complete", "The parameters have converged on the optimal fit.")
-                
-            # 2. Check if we hit the patience limit
+
             elif self._opt_cycles >= 30:
                 self.stop_optimization()
-                self._swarm_count = 1 # Force the next swarm to be Localised
+                self._swarm_count = 1
                 self.auto_guess_btn.setText("✨ Targeted Swarm (Local)")
+                from PyQt6.QtWidgets import QMessageBox
                 QMessageBox.warning(self, "Optimization Halted", "The local solver has reached its maximum iteration limit without fully converging.\n\nTry clicking 'Targeted Swarm (Local)' to dynamically bump the parameters out of this local trap!")
-                
-            # 3. Otherwise, keep looping
+
             elif getattr(self, '_is_optimizing', False):
                 from PyQt6.QtCore import QTimer
                 QTimer.singleShot(10, self._run_opt_step)
-                
+
         def on_err(err_str):
             self.stop_optimization()
+            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Failed", f"Math Error or Failed Convergence.\n\nDetails: {err_str}")
 
         self.opt_worker.finished.connect(on_success)
@@ -1374,12 +1419,24 @@ class CustomFitDialog(QDialog):
     def run_global_search(self):
         import numpy as np
         from PyQt6.QtWidgets import QProgressDialog, QMessageBox
-        
+
         if not self.is_valid or not self.parameters: return
-        
-        res = self.parent_gui._get_all_plotted_xy(aux_cols=self.used_cols, apply_selection=True)
+
+        row = max(0, self.parent_gui.series_list.currentRow())
+        pair = self.parent_gui.series_data.get(self.parent_gui.plot_mode, [{}])[row] if self.parent_gui.series_data.get(self.parent_gui.plot_mode) else {}
+        x_err_idx = pair.get('x_err', -1)
+        y_err_idx = pair.get('y_err', -1)
+
+        cols_to_fetch = list(self.used_cols)
+        if x_err_idx >= 0 and x_err_idx not in cols_to_fetch: cols_to_fetch.append(x_err_idx)
+        if y_err_idx >= 0 and y_err_idx not in cols_to_fetch: cols_to_fetch.append(y_err_idx)
+
+        res = self.parent_gui._get_all_plotted_xy(aux_cols=cols_to_fetch, apply_selection=True)
         if len(res) < 4 or len(res[0]) == 0: return
         x, y, aux_dict, _ = res
+
+        x_err = aux_dict.get(x_err_idx) if x_err_idx >= 0 else None
+        y_err = aux_dict.get(y_err_idx) if y_err_idx >= 0 else None
 
         if aux_dict is None: aux_dict = {}
         safe_aux = {}
@@ -1389,7 +1446,6 @@ class CustomFitDialog(QDialog):
             else:
                 safe_aux[c] = np.zeros_like(x)
 
-        # 1. Setup the UI Percentage Bar
         self.swarm_progress = QProgressDialog("Running Swarm Search... This may take a while.", "Cancel", 0, 100, self)
         self.swarm_progress.setWindowTitle("Swarming")
         self.swarm_progress.setModal(True)
@@ -1398,14 +1454,13 @@ class CustomFitDialog(QDialog):
 
         def norm_func(v):
             arr = np.asarray(v, dtype=np.float64)
-            m = np.max(np.abs(arr)) # Absolute max to bound between -1 and 1
+            m = np.max(np.abs(arr)) 
             return arr / m if m != 0 else arr
 
-        # 2. Package the Swarm into a background function
         def run_swarm():
             from scipy.optimize import differential_evolution
             import warnings
-            
+
             def objective(params):
                 env = {"np": np, "e": np.e, "pi": np.pi, "x": x, "data_dict": safe_aux, "norm": norm_func}
                 for i, p in enumerate(self.parameters): env[p] = params[i]
@@ -1413,7 +1468,12 @@ class CustomFitDialog(QDialog):
                     with np.errstate(all='ignore'):
                         y_pred = np.asarray(eval(self.parsed_equation, {"__builtins__": {}}, env), dtype=np.float64)
                     if y_pred.ndim == 0: y_pred = np.full_like(x, float(y_pred))
-                    return np.sum((y - y_pred)**2)
+                    residuals = y - y_pred
+                    if y_err is not None and np.any(y_err > 0):
+                        safe_err = np.where(y_err > 0, y_err, np.inf)
+                        return np.sum((residuals / safe_err)**2)
+                    else:
+                        return np.sum(residuals**2)
                 except:
                     return np.inf
 
@@ -1423,24 +1483,21 @@ class CustomFitDialog(QDialog):
             def swarm_callback(xk, convergence=0.0):
                 current_iter[0] += 1
                 pct = int((current_iter[0] / max_iterations) * 100)
-                
                 if hasattr(self, 'swarm_worker'):
                     self.swarm_worker.progress.emit(pct)
-                
                 if self.swarm_progress.wasCanceled():
                     return True 
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                
                 bounds = []
                 is_targeted = getattr(self, '_swarm_count', 0) > 0
-                
+
                 for p in self.parameters:
                     is_auto = self.param_configs[p]["mode"].currentText() == "Auto"
                     try: current_val = float(self.param_configs[p]["val"].text())
                     except: current_val = 1.0
-                    
+
                     if not is_auto:
                         margin = 1e-8
                         bounds.append((current_val - margin, current_val + margin))
@@ -1449,33 +1506,28 @@ class CustomFitDialog(QDialog):
                     else:
                         margin = max(abs(current_val) * 0.5, 2.0)
                         bounds.append((current_val - margin, current_val + margin))
-                
+
                 pop = max(5, min(15, 200 // max(1, len(self.parameters))))
-                
                 result = differential_evolution(objective, bounds, maxiter=max_iterations, popsize=pop, tol=0.01, callback=swarm_callback)
-                
+
                 if not result.success and not self.swarm_progress.wasCanceled():
                     if "Maximum number of iterations" not in result.message:
                         raise Exception("Swarm failed to converge.")
                 return result.x
 
-        # 3. CRITICAL: Initialize the Worker Thread
         self.swarm_worker = LocalWorker(run_swarm)
 
-        # 4. Define Callbacks
         def on_success(best_params):
             self.swarm_progress.accept()
-            
-            # Update the UI state
             self._swarm_count += 1
             self.auto_guess_btn.setText("✨ Targeted Swarm (Local)")
-            
+
             for i, p in enumerate(self.parameters):
                 if self.param_configs[p]["mode"].currentText() == "Auto":
                     self.param_configs[p]["val"].blockSignals(True)
                     self.param_configs[p]["val"].setText(f"{best_params[i]:.6g}")
                     self.param_configs[p]["val"].blockSignals(False)
-                    
+
             self._draw_live_preview()
             QMessageBox.information(self, "Swarm Complete", "Global search finished! Check the preview.")
 
@@ -1483,12 +1535,10 @@ class CustomFitDialog(QDialog):
             self.swarm_progress.accept()
             QMessageBox.warning(self, "Swarm Failed", f"The search could not find a reasonable fit:\n{err_str}")
 
-        # 5. Wire Everything Together
         self.swarm_worker.finished.connect(on_success)
         self.swarm_worker.error.connect(on_err)
         self.swarm_worker.progress.connect(self.swarm_progress.setValue)
         self.swarm_progress.canceled.connect(self.swarm_worker.terminate)
-        
         self.swarm_worker.start()
 
     def handle_done(self):

@@ -25,6 +25,20 @@ import matplotlib.colors as mcolors
 # ==========================================
 # HELPER FUNCTIONS
 # ==========================================
+def html_to_mathtext(text):
+    if not text: return ""
+    t = text
+    import re
+    t = t.replace("<br>", "\n")
+    t = re.sub(r'<sup>(.*?)</sup>', r'$^{\1}$', t)
+    t = re.sub(r'<sub>(.*?)</sub>', r'$_{\1}$', t)
+    t = t.replace("&middot;", "$\\cdot$").replace("·", "$\\cdot$")
+    t = t.replace("&minus;", "$-$").replace("−", "$-$")
+    t = t.replace("π", "$\\pi$")
+    t = t.replace("&plusmn;", "$\\pm$").replace("±", "$\\pm$")
+    t = re.sub(r'<[^>]+>', '', t)
+    return t
+
 def get_mpl_linestyle(qpen):
     style = qpen.style()
     if style == Qt.PenStyle.SolidLine: return '-'
@@ -56,10 +70,10 @@ def extract_legends(main_window):
             for sample, label in leg.items:
                 item = getattr(sample, 'item', None)
                 if item is not None:
-                    name = getattr(label, 'base_name', label.text) if hasattr(label, 'text') else str(label)
+                    # Extract the full rendered text (including multi-line parameters) instead of just the base name
+                    name = label.text if hasattr(label, 'text') else str(label)
                     name = html.unescape(name)
-                    clean_name = re.sub('<[^<]+>', '', name)
-                    item_to_name[item] = clean_name
+                    item_to_name[item] = name
     return item_to_name
 
 def extract_live_styles(item):
@@ -119,30 +133,47 @@ class CustomFigureOptionsDialog(QDialog):
         self.ax = ax
         self.setWindowTitle("Figure Options")
         self.setMinimumWidth(380)
-        
-        # --- FIX: Extract logical handles from the legend, not the raw lines! ---
+
         handles, labels = self.ax.get_legend_handles_labels()
-        self.lines = handles 
-        # ------------------------------------------------------------------------
-        
+
+        unique_labels = []
+        unique_handles = []
+        seen = set()
+        for h, l in zip(handles, labels):
+            if l not in seen and l is not None and not l.startswith('_child'):
+                seen.add(l)
+                unique_labels.append(l)
+                unique_handles.append(h)
+
+        self.lines = unique_handles 
+
+        self.line_groups = []
+        for label in unique_labels:
+            group = []
+            for line in self.ax.get_lines():
+                if line.get_label() == label: group.append(line)
+            for container in getattr(self.ax, 'containers', []):
+                if getattr(container, 'get_label', lambda: None)() == label: group.append(container)
+            self.line_groups.append(group)
+
         self.ls_map = {'Solid': '-', 'Dashed': '--', 'DashDot': '-.', 'Dotted': ':', 'None': 'None'}
         self.ls_map_inv = {v: k for k, v in self.ls_map.items()}
         self.marker_map = {'Circle': 'o', 'Square': 's', 'Triangle Up': '^', 'Triangle Down': 'v', 'Diamond': 'd', 'Cross': '+', 'X': 'x', 'None': 'None'}
         self.marker_map_inv = {v: k for k, v in self.marker_map.items()}
-        
+
         self.layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
-        
+
         self._build_axes_tab()
         self._build_curves_tab()
-        
+
         self.layout.addWidget(self.tabs)
-        
+
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Apply)
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
         btn_box.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.apply_changes)
-        
+
         self.layout.addWidget(btn_box)
         
     def _build_axes_tab(self):
@@ -223,19 +254,26 @@ class CustomFigureOptionsDialog(QDialog):
 
     def _load_curve_data(self, idx):
         if idx < 0 or idx >= len(self.lines): return
+
+        # Get label from the legend handle
         handle = self.lines[idx]
-        
-        # --- FIX: Extract the main line if it is trapped inside an ErrorbarContainer ---
-        is_container = hasattr(handle, 'lines')
-        main_line = handle.lines[0] if is_container else handle
-        # -------------------------------------------------------------------------------
-        
         self.curve_label_edit.setText(handle.get_label())
-        self.line_style_combo.setCurrentText(self.ls_map_inv.get(main_line.get_linestyle(), 'Solid'))
+
+        # Get physical style from the ACTUAL canvas item, not the legend proxy
+        if not self.line_groups[idx]: return
+        target_item = self.line_groups[idx][0]
+
+        is_container = hasattr(target_item, 'lines')
+        main_line = target_item.lines[0] if is_container else target_item
+
+        ls = main_line.get_linestyle()
+        if ls in [' ', '', 'none', 'None', None]: ls = 'None'
+
+        self.line_style_combo.setCurrentText(self.ls_map_inv.get(ls, 'Solid'))
         self.line_width_spin.setValue(main_line.get_linewidth())
         self.line_color_btn._color = mpl_color_to_qcolor(main_line.get_color())
         self.line_color_btn.update_style()
-        
+
         self.marker_style_combo.setCurrentText(self.marker_map_inv.get(main_line.get_marker(), 'None'))
         self.marker_size_spin.setValue(main_line.get_markersize())
         self.marker_face_btn._color = mpl_color_to_qcolor(main_line.get_markerfacecolor())
@@ -245,27 +283,27 @@ class CustomFigureOptionsDialog(QDialog):
 
     def _save_current_curve(self):
         idx = self.curve_combo.currentIndex()
-        if idx < 0 or idx >= len(self.lines): return
-        handle = self.lines[idx]
-        
-        # --- FIX: Target the main line inside the container ---
-        is_container = hasattr(handle, 'lines')
-        main_line = handle.lines[0] if is_container else handle
-        # ------------------------------------------------------
-        
-        # Update curve label in combo box cleanly
+        if idx < 0 or idx >= len(self.line_groups): return
+
         new_label = self.curve_label_edit.text()
-        handle.set_label(new_label)
         self.curve_combo.setItemText(idx, new_label)
-        
-        main_line.set_linestyle(self.ls_map[self.line_style_combo.currentText()])
-        main_line.set_linewidth(self.line_width_spin.value())
-        main_line.set_color(qcolor_to_mpl_rgba(self.line_color_btn.get_color()))
-        
-        main_line.set_marker(self.marker_map[self.marker_style_combo.currentText()])
-        main_line.set_markersize(self.marker_size_spin.value())
-        main_line.set_markerfacecolor(qcolor_to_mpl_rgba(self.marker_face_btn.get_color()))
-        main_line.set_markeredgecolor(qcolor_to_mpl_rgba(self.marker_edge_btn.get_color()))
+
+        for item in self.line_groups[idx]:
+            if hasattr(item, 'set_label'):
+                item.set_label(new_label)
+
+            is_container = hasattr(item, 'lines')
+            main_line = item.lines[0] if is_container else item
+
+            line_style = self.ls_map[self.line_style_combo.currentText()]
+            main_line.set_linestyle(line_style)
+            main_line.set_linewidth(self.line_width_spin.value())
+            main_line.set_color(qcolor_to_mpl_rgba(self.line_color_btn.get_color()))
+
+            main_line.set_marker(self.marker_map[self.marker_style_combo.currentText()])
+            main_line.set_markersize(self.marker_size_spin.value())
+            main_line.set_markerfacecolor(qcolor_to_mpl_rgba(self.marker_face_btn.get_color()))
+            main_line.set_markeredgecolor(qcolor_to_mpl_rgba(self.marker_edge_btn.get_color()))
 
     def apply_changes(self):
         try: self.ax.set_xlim([float(self.xmin_edit.text()), float(self.xmax_edit.text())])
@@ -424,29 +462,38 @@ class MatplotlibPopout(QMainWindow):
         self.canvas.draw_idle()
 
     def _rebuild_legend_securely(self):
-        """Builds the legend while strictly enforcing dark mode and custom marker sizes."""
         if not self.ax.get_lines() and not self.ax.containers: return
-        
+
         bg_color = theme.panel_bg if self.is_dark_mode else "#ffffff"
         fg_color = theme.fg if self.is_dark_mode else "#000000"
         grid_color = "#444444" if self.is_dark_mode else "#cccccc"
-        
-        # Pull exact handles safely from Matplotlib's native generator
+
         handles, labels = self.ax.get_legend_handles_labels()
         if not handles: return
-        
-        legend = self.ax.legend(handles, labels, facecolor=bg_color, edgecolor=grid_color)
+
+        unique_labels = []
+        unique_handles = []
+        seen = set()
+        for h, l in zip(handles, labels):
+            if l not in seen and l is not None and not l.startswith('_child'):
+                seen.add(l)
+                unique_labels.append(l)
+                unique_handles.append(h)
+
+        if not unique_handles: return
+
+        legend = self.ax.legend(unique_handles, unique_labels, facecolor=bg_color, edgecolor=grid_color)
+
         for text in legend.get_texts():
             text.set_color(fg_color)
-            
+
         import matplotlib
         leg_handles = getattr(legend, 'legend_handles', getattr(legend, 'legendHandles', []))
-        
-        # Safely enforce marker sizes by checking object types
-        for orig_handle, leg_handle in zip(handles, leg_handles):
+
+        for orig_handle, leg_handle in zip(unique_handles, leg_handles):
             try:
                 if isinstance(orig_handle, matplotlib.container.ErrorbarContainer):
-                    main_line = orig_handle.lines[0] # Extract the main plot line from the container
+                    main_line = orig_handle.lines[0] 
                     if hasattr(leg_handle, 'lines'):
                         leg_line = leg_handle.lines[0]
                         leg_line.set_markersize(main_line.get_markersize())
@@ -498,30 +545,29 @@ class MatplotlibPopout(QMainWindow):
     def _translate_plot(self, grid_color, bg_color, fg_color):
         original_plot = self.main_window.plot_widget
         item_to_name = extract_legends(self.main_window)
-        
+
         bottom_axis = original_plot.getAxis('bottom')
         left_axis = original_plot.getAxis('left')
-        if bottom_axis.isVisible(): self.ax.set_xlabel(bottom_axis.labelText)
-        if left_axis.isVisible(): self.ax.set_ylabel(left_axis.labelText)
-        
+
+        if bottom_axis.isVisible(): self.ax.set_xlabel(html_to_mathtext(bottom_axis.labelText))
+        if left_axis.isVisible(): self.ax.set_ylabel(html_to_mathtext(left_axis.labelText))
+
         xlog = self.main_window.xscale.currentText() == "Log"
         ylog = self.main_window.yscale.currentText() == "Log"
         xbase = self.main_window._parse_log_base(self.main_window.xbase.text())
         ybase = self.main_window._parse_log_base(self.main_window.ybase.text())
-        
-        # --- NEW: BUILD AN ERROR BAR HASH MAP (Collision Proof) ---
+
         eb_map = {}
         for eb in self.main_window.avg_error_pool:
             if not eb.isVisible(): continue
             x_data = eb.opts.get('x')
             if x_data is not None and len(x_data) > 0:
-                sig = (len(x_data), float(x_data[0])) # Include length to prevent collisions
+                sig = (len(x_data), float(x_data[0])) 
                 eb_map[sig] = eb.opts
-        # ----------------------------------------------------------
 
         mpl_symbols = {'o':'o', 's':'s', 't':'^', 't1':'^', 't2':'v', 't3':'>', 'd':'d', '+':'+', 'x':'x', 'p':'p', 'h':'h', 'star':'*'}
 
-        # --- FIX 2: Explicitly draw Confidence Bands (FillBetweenItems) ---
+        ignore_items = set()
         for fit in getattr(self.main_window, 'active_fits', []):
             band = fit.get("band_item")
             if band is not None and band.isVisible():
@@ -529,17 +575,22 @@ class MatplotlibPopout(QMainWindow):
                 y_vis = fit["plot_item"].yData
                 y_up = y_vis + fit["band_std"]
                 y_dn = y_vis - fit["band_std"]
-                
+
                 x_raw, y_up_raw = self.main_window._get_raw_fit_coords(x_vis, y_up)
                 _, y_dn_raw = self.main_window._get_raw_fit_coords(x_vis, y_dn)
-                
+
                 brush = band.brush() if hasattr(band, 'brush') else pg.mkBrush(255, 0, 0, 60)
                 rgba = qcolor_to_mpl_rgba(brush.color())
                 self.ax.fill_between(x_raw, y_dn_raw, y_up_raw, facecolor=rgba, edgecolor='none', zorder=band.zValue())
-        # ------------------------------------------------------------------
+
+                if fit.get("band_curves"):
+                    ignore_items.update(fit["band_curves"])
+
+        current_label = None 
 
         for item in original_plot.listDataItems():
-            if not item.isVisible(): continue # --- FIX 1: Ignore Phantom Curves ---
+            if item in ignore_items: continue
+            if not item.isVisible(): continue 
             if not hasattr(item, 'getData'): continue
             try:
                 data = item.getData()
@@ -547,77 +598,73 @@ class MatplotlibPopout(QMainWindow):
                 x, y = np.array(data[0]), np.array(data[1])
             except Exception:
                 continue
-            
+
             if len(x) == 0: continue
-                
+
             with np.errstate(over='ignore', invalid='ignore'):
                 if xlog: x = np.power(xbase, x)
                 if ylog: y = np.power(ybase, y)
-                
+
             p_line, sym, sym_size, b_sym, p_sym = extract_live_styles(item)
-            
-            # --- FIX: Extract PyQtGraph's Z-order hierarchy ---
             z_order = item.zValue()
-            # --------------------------------------------------
-            
+
             if p_line.style() == Qt.PenStyle.NoPen:
                 line_color, width, linestyle = 'none', 0.0, 'None'
             else:
                 line_color = qcolor_to_mpl_rgba(p_line.color())
                 width = max(1.0, p_line.widthF())
                 linestyle = get_mpl_linestyle(p_line)
-                
+
             marker = mpl_symbols.get(sym, 'o') if sym else 'None'
             face_color = 'none' if b_sym.style() == Qt.BrushStyle.NoBrush else qcolor_to_mpl_rgba(b_sym.color())
             edge_color = 'none' if p_sym.style() == Qt.PenStyle.NoPen else qcolor_to_mpl_rgba(p_sym.color())
 
-            name = item_to_name.get(item, getattr(item, 'opts', {}).get('name', None))
-            
-            # --- FIX: UNIFIED RENDERING ENGINE ---
+            raw_name = item_to_name.get(item, getattr(item, 'opts', {}).get('name', None))
+            name = html_to_mathtext(raw_name) if raw_name else None
+
+            if name:
+                current_label = name
+            else:
+                name = current_label
+
             x_sig = (len(data[0]), float(data[0][0]))
             eb_opts = eb_map.get(x_sig)
-            
+
             if eb_opts:
-                # We have matching error bars! Let Matplotlib draw the line, symbol, AND errors at once.
                 xerr = eb_opts.get('width') / 2.0 if eb_opts.get('width') is not None else None
                 yerr = eb_opts.get('height') / 2.0 if eb_opts.get('height') is not None else None
-                
+
                 if xerr is not None and not np.any(xerr > 0): xerr = None
                 if yerr is not None and not np.any(yerr > 0): yerr = None
-                
+
                 raw_color = eb_opts.get('mpl_ecolor')
                 ecolor = qcolor_to_mpl_rgba(pg.mkColor(raw_color)) if raw_color else line_color
                 elinewidth = eb_opts.get('mpl_elinewidth', width)
                 capsize = eb_opts.get('mpl_capsize', 3.0)
-                
-                # --- FIX: Inject zorder ---
+
                 self.ax.errorbar(x, y, xerr=xerr, yerr=yerr, color=line_color, linewidth=width, 
                                  linestyle=linestyle, marker=marker, markersize=sym_size, 
                                  markerfacecolor=face_color, markeredgecolor=edge_color,
                                  ecolor=ecolor, elinewidth=elinewidth, capsize=capsize, 
                                  label=name, zorder=z_order) 
             else:
-                # Standard trace without error bars
-                # --- FIX: Inject zorder ---
                 self.ax.plot(x, y, color=line_color, linewidth=width, linestyle=linestyle, 
                              marker=marker, markersize=sym_size, 
                              markerfacecolor=face_color, markeredgecolor=edge_color, 
                              label=name, zorder=z_order) 
-            # -------------------------------------
-            
+
         if xlog: self.ax.set_xscale('log', base=xbase)
         if ylog: self.ax.set_yscale('log', base=ybase)
-                
-        # --- Synchronised Dynamic Gridlines ---
+
         show_x = self.main_window.grid_x_cb.isChecked()
         show_y = self.main_window.grid_y_cb.isChecked()
         try: alpha = float(self.main_window.grid_alpha_edit.text())
         except ValueError: alpha = 0.35
-        
+
         if show_x and show_y: self.ax.grid(True, axis='both', color=grid_color, linestyle='--', alpha=alpha)
         elif show_x: self.ax.grid(True, axis='x', color=grid_color, linestyle='--', alpha=alpha)
         elif show_y: self.ax.grid(True, axis='y', color=grid_color, linestyle='--', alpha=alpha)
         else: self.ax.grid(False)
-            
+
         self._rebuild_legend_securely()
         self.fig.tight_layout()
