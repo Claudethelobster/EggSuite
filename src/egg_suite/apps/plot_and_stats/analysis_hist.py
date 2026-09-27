@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QDoubleSpinBox, QSpinBox
 )
 from PyQt6.QtCore import Qt
-from ui.theme import theme
+from egg_suite.ui.theme import theme
 
 class SmartBinningDialog(QDialog):
     def __init__(self, data, current_bins, parent=None):

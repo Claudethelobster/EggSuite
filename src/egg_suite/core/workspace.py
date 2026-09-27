@@ -1,6 +1,6 @@
 import os
 from PyQt6.QtCore import QObject, pyqtSignal
-from core.history_engine import HistoryTree # <--- ADD IMPORT
+from egg_suite.core.history_engine import HistoryTree # <--- ADD IMPORT
 
 class GlobalWorkspace(QObject):
     dataset_added = pyqtSignal(str)      

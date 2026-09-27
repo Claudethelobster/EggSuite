@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 )
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from ui.theme import theme
+from egg_suite.ui.theme import theme
 
 class UncertaintyCalculatorDialog(QDialog):
     def __init__(self, dataset, parent=None):
@@ -270,7 +270,7 @@ class UncertaintyCalculatorDialog(QDialog):
         # 2. Physics Constants
         consts = []
         def const_repl(m):
-            from core.constants import PHYSICS_CONSTANTS
+            from egg_suite.core.constants import PHYSICS_CONSTANTS
             c_key = m.group(1)
             if c_key in PHYSICS_CONSTANTS:
                 c_html = PHYSICS_CONSTANTS[c_key]["html"]

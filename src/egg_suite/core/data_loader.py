@@ -10,7 +10,7 @@ import h5py
 
 # --- SAFE IMPORT FOR NATIVE BADGERLOOP FILES ---
 try:
-    from external_modules.badger_loop_py3_3 import Dataset
+    from egg_suite.external_modules.badger_loop_py3_3 import Dataset
     BADGERLOOP_AVAILABLE = True
 except ImportError:
     BADGERLOOP_AVAILABLE = False
@@ -403,7 +403,7 @@ class HDF5Dataset:
                         matrix[:, col_idx] = col_data[key]
                         
                 sweep_name = path.strip('/') if path != '/' else f"Sweep {i}"
-                from core.data_loader import CSVSweep # Ensure we use the container
+                from egg_suite.core.data_loader import CSVSweep # Ensure we use the container
                 self.sweeps.append(CSVSweep(matrix, name=sweep_name))
                 self.num_points += length
                 

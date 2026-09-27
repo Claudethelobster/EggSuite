@@ -1,7 +1,7 @@
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser, QPushButton, QTabWidget, QWidget
 
-from ui.theme import theme
+from egg_suite.ui.theme import theme
 
 class HelpDialog(QDialog):
     def __init__(self, parent=None):

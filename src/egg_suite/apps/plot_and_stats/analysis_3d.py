@@ -8,8 +8,8 @@ from PyQt6.QtCore import QObject, QEvent, Qt
 
 from PyQt6.QtWidgets import QMessageBox, QDialog, QVBoxLayout, QLabel, QPushButton
 
-from ui.theme import theme
-from ui.custom_widgets import DraggableLabel
+from egg_suite.ui.theme import theme
+from egg_suite.ui.custom_widgets import DraggableLabel
 
 class Crosshair3DManager(QObject):
     def __init__(self, main_window):

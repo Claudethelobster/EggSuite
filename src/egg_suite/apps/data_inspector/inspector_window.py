@@ -9,10 +9,10 @@ from PyQt6.QtWidgets import (
     QSplitter, QTextEdit, QDialog, QTabWidget, QComboBox
 )
 from PyQt6.QtGui import QAction
-from ui.theme import theme
-from ui.custom_widgets import ToastNotification
-from apps.data_inspector.uncertainty_window import UncertaintyCalculatorDialog
-from core.history_engine import EggCommand
+from egg_suite.ui.theme import theme
+from egg_suite.ui.custom_widgets import ToastNotification
+from egg_suite.apps.data_inspector.uncertainty_window import UncertaintyCalculatorDialog
+from egg_suite.core.history_engine import EggCommand
 
 class DropNaNCommand(EggCommand):
     """Encapsulates the Drop NaN logic so it can be safely undone and redone."""
@@ -147,6 +147,8 @@ class DataInspectorWindow(QMainWindow):
             self.workspace.dataset_added.connect(self._on_workspace_updated)
             self.workspace.dataset_removed.connect(self._on_workspace_updated)
             self._on_workspace_updated()
+        
+        theme.theme_changed.connect(self._apply_theme)
         
         if not self.is_popout:
             if self.display_mode == "Fullscreen":
@@ -302,7 +304,7 @@ class DataInspectorWindow(QMainWindow):
         
     def open_data_slicer(self):
         if not self.current_dataset: return
-        from apps.plot_and_stats.analysis import DataSlicerDialog
+        from egg_suite.apps.plot_and_stats.analysis import DataSlicerDialog
         from PyQt6.QtWidgets import QMessageBox
         
         dlg = DataSlicerDialog(self)
@@ -348,8 +350,8 @@ class DataInspectorWindow(QMainWindow):
         try:
             import numpy as np
             import os
-            from core.file_editor import FileEditor
-            from core.data_loader import DataLoaderThread
+            from egg_suite.core.file_editor import FileEditor
+            from egg_suite.core.data_loader import DataLoaderThread
             from PyQt6.QtWidgets import QProgressDialog, QApplication
             from PyQt6.QtCore import Qt
 
@@ -423,7 +425,7 @@ class DataInspectorWindow(QMainWindow):
                             
                         blocks.append(data_padded)
                         
-                    from core.file_editor import FileEditor
+                    from egg_suite.core.file_editor import FileEditor
                     FileEditor.append_column_to_file(file_type, self.current_dataset, self.current_dataset.filename, new_name, blocks, opts)
                     
                     new_idx = len(self.current_dataset.column_names)
@@ -436,7 +438,7 @@ class DataInspectorWindow(QMainWindow):
                         else:
                             self.current_dataset.data = np.column_stack((self.current_dataset.data, blocks[i]))
                             
-                from core.history_engine import EggCommand
+                from egg_suite.core.history_engine import EggCommand
                 class SlicerCommand(EggCommand):
                     def __init__(self): super().__init__(f"Slice Rows [{slice_str}]")
                     def execute(self): pass
@@ -607,7 +609,7 @@ class DataInspectorWindow(QMainWindow):
             if hasattr(self.workspace, 'add_single_file'):
                 self.workspace.add_single_file(target_file, new_dataset)
             else:
-                from core.history_engine import HistoryTree
+                from egg_suite.core.history_engine import HistoryTree
                 self.workspace.datasets[target_file] = {
                     "name": os.path.basename(target_file), "type": "file", 
                     "parent": None, "children": [], "dataset": new_dataset,
@@ -859,3 +861,13 @@ class DataInspectorWindow(QMainWindow):
             self.table_view.clearSelection()
             
         self._refresh_timeline_ui()
+
+    def _apply_theme(self, is_dark=None):
+        """Dynamically restyles Data Inspector menubar, toolbar, and tables in real-time."""
+        self.setStyleSheet(f"background-color: {theme.bg}; color: {theme.fg};")
+        if self.menuBar():
+            self.menuBar().setStyleSheet(f"background-color: {theme.panel_bg}; color: {theme.fg}; border-bottom: 1px solid {theme.border};")
+        if hasattr(self, 'table_view') and self.table_view:
+            self.table_view.setStyleSheet(f"background-color: {theme.panel_bg}; color: {theme.fg}; gridline-color: {theme.border};")
+        if hasattr(self, 'timeline_tree') and self.timeline_tree:
+            self.timeline_tree.setStyleSheet(f"background-color: {theme.panel_bg}; color: {theme.fg}; border: 1px solid {theme.border};")

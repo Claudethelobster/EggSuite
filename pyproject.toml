@@ -16,6 +16,7 @@ dependencies = [
     "PyOpenGL_accelerate",
     "matplotlib",
     "h5py",
+    "pandas",
     "uncertainties"
 ]
 
@@ -25,6 +26,8 @@ egg_suite = "egg_suite.__main__:main"
 [project.urls]
 Homepage = "https://github.com/Claudethelobster/EggSuite"
 
-[tool.setuptools]
-packages = ["egg_suite"]
-include-package-data = true
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+egg_suite = ["assets/**/*"]

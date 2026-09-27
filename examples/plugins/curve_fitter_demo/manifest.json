@@ -1,0 +1,15 @@
+{
+    "name": "Live Curve Fitter",
+    "description": "Interactive curve fitting tool demonstrating EggSuite's modernized DataFrame & Analysis API.",
+    "icon": "\u26a1",
+    "author": "EggSuite Team",
+    "version": "1.0.0",
+    "entry_point": "main.py",
+    "pinned": false,
+    "dependencies": [
+        "numpy",
+        "scipy",
+        "pandas",
+        "pyqtgraph"
+    ]
+}

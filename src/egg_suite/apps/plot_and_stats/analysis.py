@@ -14,9 +14,9 @@ from PyQt6.QtWidgets import (
     QProgressDialog, QListWidget, QListWidgetItem, QTabWidget, QScrollArea,
     QTextEdit, QWidget, QRadioButton
 )
-from core.constants import PHYSICS_CONSTANTS, GREEK_MAP
-from core.data_loader import DataLoaderThread
-from ui.theme import theme
+from egg_suite.core.constants import PHYSICS_CONSTANTS, GREEK_MAP
+from egg_suite.core.data_loader import DataLoaderThread
+from egg_suite.ui.theme import theme
 
 class AreaUnderCurveDialog(QDialog):
     def __init__(self, main_window):
@@ -1088,7 +1088,7 @@ class PeakFinderTool(QDialog):
                 # 6. Plot the beautiful filtered spectrum!
                 self.parent_gui.plot()
                 
-            from core.data_loader import DataLoaderThread
+            from egg_suite.core.data_loader import DataLoaderThread
             self.parent_gui.loader_thread = DataLoaderThread(self.parent_gui.dataset.filename, opts)
             self.parent_gui.loader_thread.progress.connect(self.parent_gui._update_progress_ui)
             self.parent_gui.loader_thread.finished.connect(on_ifft_loaded)

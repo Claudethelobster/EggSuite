@@ -6,8 +6,8 @@ from PyQt6.QtWidgets import (
     QFormLayout, QLineEdit, QPushButton, QLabel, 
     QSlider, QFileDialog, QMessageBox, QComboBox, QApplication
 )
-from ui.theme import theme
-from ui.custom_widgets import ToggleSwitch
+from egg_suite.ui.theme import theme
+from egg_suite.ui.custom_widgets import ToggleSwitch
 
 class PreferencesDialog(QDialog):
     def __init__(self, main_window):
@@ -138,7 +138,7 @@ class PreferencesDialog(QDialog):
         tab = QWidget()
         self.display_form = QFormLayout(tab) 
         
-        self.dark_mode = ToggleSwitch("Enable Dark Mode Theme (Requires Restart)")
+        self.dark_mode = ToggleSwitch("Enable Dark Mode Theme")
         self.display_form.addRow("Application Theme:", self.dark_mode)
         
         self.display_form.addRow(QLabel("<hr style='border: 1px solid #ccc;'>"))

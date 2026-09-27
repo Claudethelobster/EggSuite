@@ -12,10 +12,10 @@ from PyQt6.QtWidgets import (
     QTabWidget
 )
 
-from core.constants import PHYSICS_CONSTANTS, GREEK_MAP
-from ui.theme import theme
-from ui.dialogs.data_mgmt import ConstantsDialog, CopyableErrorDialog
-from utils.function_io import load_function_from_file
+from egg_suite.core.constants import PHYSICS_CONSTANTS, GREEK_MAP
+from egg_suite.ui.theme import theme
+from egg_suite.ui.dialogs.data_mgmt import ConstantsDialog, CopyableErrorDialog
+from egg_suite.utils.function_io import load_function_from_file
 
 class FitFunctionDialog(QDialog):
     def __init__(self, parent_gui):

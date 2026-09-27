@@ -13,13 +13,13 @@ from PyQt6.QtWidgets import (
     QCompleter
 )
 
-from ui.theme import theme
-from ui.custom_widgets import ToastNotification
-from apps.data_inspector.inspector_window import DataInspectorWindow
-from ui.custom_widgets import ToggleSwitch
-from core.data_loader import DataLoaderThread
-from core.plugin_manager import PluginManager
-from ui.dialogs.data_mgmt import FileImportDialog, CopyableErrorDialog, TemplateSelectionDialog, BatchImportDialog
+from egg_suite.ui.theme import theme
+from egg_suite.ui.custom_widgets import ToastNotification
+from egg_suite.apps.data_inspector.inspector_window import DataInspectorWindow
+from egg_suite.ui.custom_widgets import ToggleSwitch
+from egg_suite.core.data_loader import DataLoaderThread
+from egg_suite.core.plugin_manager import PluginManager
+from egg_suite.ui.dialogs.data_mgmt import FileImportDialog, CopyableErrorDialog, TemplateSelectionDialog, BatchImportDialog
 
 class RecentFilesDialog(QDialog):
     def __init__(self, settings, parent=None):
@@ -566,12 +566,26 @@ class HubWindow(QMainWindow):
         right_panel = QVBoxLayout()
         
         header_lay = QHBoxLayout()
-        header_lbl = QLabel("EggSuite")
-        header_lbl.setStyleSheet(f"font-size: 36px; font-weight: bold; color: {theme.primary_text}; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;")
-        header_lay.addWidget(header_lbl)
+        self.header_lbl = QLabel("EggSuite")
+        self.header_lbl.setStyleSheet(f"font-size: 36px; font-weight: bold; color: {theme.primary_text}; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;")
+        header_lay.addWidget(self.header_lbl)
         header_lay.addStretch()
         
-        # --- NEW: The dedicated External Apps button ---
+        # --- Batch Wizard Button ---
+        self.btn_batch_wizard = QPushButton("🚀 Batch Wizard")
+        self.btn_batch_wizard.setStyleSheet(f"""
+            QPushButton {{
+                font-weight: bold; font-size: 14px; padding: 10px 18px; 
+                background-color: {theme.panel_bg}; color: {theme.primary_text}; 
+                border: 2px solid {theme.primary_border}; border-radius: 6px;
+            }}
+            QPushButton:hover {{ background-color: {theme.primary_bg}; }}
+        """)
+        self.btn_batch_wizard.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_batch_wizard.clicked.connect(self._open_batch_wizard)
+        header_lay.addWidget(self.btn_batch_wizard, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # --- Dedicated External Apps button ---
         self.btn_external_apps = QPushButton("🧩 Browse Plugins")
         self.btn_external_apps.setStyleSheet(f"""
             QPushButton {{
@@ -594,10 +608,10 @@ class HubWindow(QMainWindow):
         ]
         random_fact = random.choice(EGG_FACTS)
         
-        subtitle_lbl = QLabel(f"Select an application to begin.<br><br><span style='color: #888;'><i>{random_fact}</i></span>")
-        subtitle_lbl.setWordWrap(True)
-        subtitle_lbl.setStyleSheet("font-size: 14px; margin-bottom: 10px;")
-        right_panel.addWidget(subtitle_lbl)
+        self.subtitle_lbl = QLabel(f"Select an application to begin.<br><br><span style='color: #888;'><i>{random_fact}</i></span>")
+        self.subtitle_lbl.setWordWrap(True)
+        self.subtitle_lbl.setStyleSheet("font-size: 14px; margin-bottom: 10px;")
+        right_panel.addWidget(self.subtitle_lbl)
 
         # --- NEW: Scroll Area for Apps ---
         from PyQt6.QtWidgets import QScrollArea
@@ -627,6 +641,7 @@ class HubWindow(QMainWindow):
 
         self.workspace.dataset_added.connect(self._refresh_file_tree)
         self.workspace.dataset_removed.connect(self._refresh_file_tree)
+        theme.theme_changed.connect(self._apply_theme)
         
         self.setAcceptDrops(True)
         self.window_dimmer = WindowDimmer(self.stacked_widget)
@@ -649,8 +664,8 @@ class HubWindow(QMainWindow):
 
         # --- Top Bar: Back Button, Title, Refresh & Create ---
         header_lay = QHBoxLayout()
-        back_btn = QPushButton("🔙 Back to Hub")
-        back_btn.setStyleSheet(f"""
+        self.browser_back_btn = QPushButton("🔙 Back to Hub")
+        self.browser_back_btn.setStyleSheet(f"""
             QPushButton {{
                 font-weight: bold; font-size: 14px; padding: 8px 15px; 
                 background-color: {theme.panel_bg}; color: {theme.fg}; 
@@ -661,17 +676,17 @@ class HubWindow(QMainWindow):
                 border: 1px solid {theme.primary_border};
             }}
         """)
-        back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.browser_back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         
         # --- ADDED: Back button now also refreshes the list in the background ---
-        back_btn.clicked.connect(lambda: (self.stacked_widget.setCurrentIndex(0), self._scan_external_apps()))
+        self.browser_back_btn.clicked.connect(lambda: (self.stacked_widget.setCurrentIndex(0), self._scan_external_apps()))
         
-        title = QLabel("External Applications")
-        title.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {theme.primary_text};")
+        self.browser_title = QLabel("External Applications")
+        self.browser_title.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {theme.primary_text};")
 
         # --- ADDED: Manual Refresh Button ---
-        refresh_btn = QPushButton("🔄 Refresh List")
-        refresh_btn.setStyleSheet(f"""
+        self.browser_refresh_btn = QPushButton("🔄 Refresh List")
+        self.browser_refresh_btn.setStyleSheet(f"""
             QPushButton {{
                 font-weight: bold; font-size: 14px; padding: 8px 15px; 
                 background-color: {theme.panel_bg}; color: {theme.fg}; 
@@ -682,12 +697,27 @@ class HubWindow(QMainWindow):
                 border: 1px solid {theme.primary_border};
             }}
         """)
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.browser_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         # --- FIX: Added a lambda to trigger both the scan and the toast ---
-        refresh_btn.clicked.connect(lambda: (self._scan_external_apps(), self.show_toast("Refreshed", "The application list has been updated.")))
+        self.browser_refresh_btn.clicked.connect(lambda: (self._scan_external_apps(), self.show_toast("Refreshed", "The application list has been updated.")))
         
-        create_btn = QPushButton("➕ Create New App")
-        create_btn.setStyleSheet(f"""
+        self.browser_api_docs_btn = QPushButton("📖 API Reference")
+        self.browser_api_docs_btn.setStyleSheet(f"""
+            QPushButton {{
+                font-weight: bold; font-size: 14px; padding: 8px 15px; 
+                background-color: {theme.panel_bg}; color: {theme.fg}; 
+                border: 1px solid {theme.border}; border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.primary_bg}; color: {theme.primary_text}; 
+                border: 1px solid {theme.primary_border};
+            }}
+        """)
+        self.browser_api_docs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.browser_api_docs_btn.clicked.connect(self._open_api_docs)
+
+        self.browser_create_btn = QPushButton("➕ Create New App")
+        self.browser_create_btn.setStyleSheet(f"""
             QPushButton {{
                 font-weight: bold; font-size: 14px; padding: 8px 15px; 
                 background-color: {theme.primary_bg}; color: {theme.primary_text}; 
@@ -695,15 +725,16 @@ class HubWindow(QMainWindow):
             }}
             QPushButton:hover {{ border: 1px solid white; }}
         """)
-        create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        create_btn.clicked.connect(self._open_app_creator)
+        self.browser_create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.browser_create_btn.clicked.connect(self._open_app_creator)
         
-        header_lay.addWidget(back_btn)
+        header_lay.addWidget(self.browser_back_btn)
         header_lay.addStretch()
-        header_lay.addWidget(title)
+        header_lay.addWidget(self.browser_title)
         header_lay.addStretch()
-        header_lay.addWidget(refresh_btn) # Add the refresh button
-        header_lay.addWidget(create_btn)  
+        header_lay.addWidget(self.browser_refresh_btn) # Add the refresh button
+        header_lay.addWidget(self.browser_api_docs_btn) # Add the API reference documentation button
+        header_lay.addWidget(self.browser_create_btn)  
         # ---------------------------------------------------
         
         layout.addLayout(header_lay)
@@ -781,9 +812,7 @@ class HubWindow(QMainWindow):
         apps_to_draw.append(settings_tile)
         
         # 2. External Pinned Apps
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        apps_dir = os.path.abspath(os.path.join(base_dir, "../../external_apps"))
-        plugins = PluginManager.scan_plugins(apps_dir)
+        plugins = PluginManager.scan_plugins()
         
         for p in plugins:
             if p.get("pinned", False):
@@ -823,6 +852,18 @@ class HubWindow(QMainWindow):
                 self._scan_external_apps() # Refresh the browser if we are looking at it
             self.show_toast("Success", "App pinned to Hub." if state else "App unpinned from Hub.")
         
+    def _open_batch_wizard(self):
+        """Spawns the interactive Batch Processing Wizard dialog."""
+        from egg_suite.ui.dialogs.batch_wizard_dialog import BatchWizardDialog
+        dlg = BatchWizardDialog(self)
+        dlg.exec()
+
+    def _open_api_docs(self):
+        """Spawns the interactive API Documentation & Reference dialog."""
+        from egg_suite.ui.dialogs.api_docs_dialog import ApiDocumentationDialog
+        dlg = ApiDocumentationDialog(self)
+        dlg.exec()
+
     def _open_app_creator(self):
         """Spawns the dialog and generates the boilerplate files if accepted."""
         import json
@@ -1147,11 +1188,8 @@ def run_app(api):
         """Uses the PluginManager to discover apps and builds their UI cards."""
         self.app_list.clear()
         
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        apps_dir = os.path.abspath(os.path.join(base_dir, "../../external_apps"))
-        
-        # --- FIX: Ask the manager for the list of plugins ---
-        plugins = PluginManager.scan_plugins(apps_dir)
+        # Discover plugins across standard directories
+        plugins = PluginManager.scan_plugins()
         
         # --- FIX: Loop through the returned dictionaries and pass the missing dependencies ---
         for p in plugins:
@@ -1746,7 +1784,7 @@ def run_app(api):
         elif self.workspace.datasets:
             active_file = list(self.workspace.datasets.keys())[0]
 
-        from apps.plot_and_stats.main_window import BadgerLoopQtGraph
+        from egg_suite.apps.plot_and_stats.main_window import BadgerLoopQtGraph
         plot_window = BadgerLoopQtGraph(self.workspace, is_popout=popout, initial_file=active_file)
         
         if popout:
@@ -1775,12 +1813,166 @@ def run_app(api):
             self.open_apps.append(inspector_window)
 
     def _launch_settings_app(self, popout):
-        from apps.settings.settings import PreferencesDialog
+        from egg_suite.apps.settings.settings import PreferencesDialog
         
         dlg = PreferencesDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new_settings = dlg.get_results()
+            changes = []
+            
+            # Check for Theme change
+            old_dark = self.settings.value("dark_mode", False, bool)
+            new_dark = new_settings.get("dark_mode", old_dark)
+            if new_dark != old_dark:
+                self.settings.setValue("dark_mode", new_dark)
+                theme.update(new_dark)
+                changes.append(f"Theme switched to {'Dark Mode' if new_dark else 'Light Mode'}")
+
+            # Check other settings
             for key, val in new_settings.items():
-                self.settings.setValue(key, val)
-                
-            self.show_toast("Settings Applied", "Global preferences updated successfully.")
+                if key == "dark_mode":
+                    continue
+                old_val = self.settings.value(key)
+                if str(old_val) != str(val):
+                    self.settings.setValue(key, val)
+                    readable_key = key.replace("_", " ").title()
+                    changes.append(f"{readable_key}: {val}")
+
+            if changes:
+                summary = "\n".join(changes)
+                self.show_toast("Preferences Updated", summary)
+            else:
+                self.show_toast("Preferences Saved", "No changes were made.")
+
+    def _apply_theme(self, is_dark=None):
+        """Dynamically restyles all Hub widgets and open windows in real-time."""
+        self.setStyleSheet(f"background-color: {theme.bg}; color: {theme.fg};")
+
+        # Left panel styling
+        if hasattr(self, 'workspace_search'):
+            self.workspace_search.setStyleSheet(f"background-color: {theme.bg}; color: {theme.fg}; border: 1px solid {theme.border}; padding: 5px; border-radius: 4px;")
+
+        if hasattr(self, 'file_tree'):
+            scroll_css = f"""
+                QScrollBar:horizontal {{ border: 1px solid {theme.border}; background: {theme.bg}; height: 14px; margin: 0px; border-radius: 6px; }}
+                QScrollBar::handle:horizontal {{ background: {theme.primary_border}; min-width: 30px; border-radius: 5px; margin: 1px; }}
+                QScrollBar::handle:horizontal:hover {{ background: {theme.primary_bg}; }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+                QTreeWidget::item {{ padding: 4px; }}
+                QTreeWidget::item:selected {{ background-color: {theme.primary_bg}; color: {theme.primary_text}; border-radius: 4px; }}
+            """
+            self.file_tree.setStyleSheet(f"QTreeWidget {{ background-color: {theme.panel_bg}; border: 1px solid {theme.border}; border-radius: 6px; font-size: 14px; padding: 5px; outline: none; }} {scroll_css}")
+
+        primary_btn_style = f"""
+            QPushButton {{ 
+                font-weight: bold; background-color: {theme.primary_bg}; color: {theme.primary_text}; 
+                padding: 8px; border: 1px solid {theme.primary_border}; border-radius: 4px; 
+            }}
+            QPushButton:hover {{ border: 1px solid {theme.primary_text}; }}
+            QPushButton:disabled {{ background-color: transparent; color: #777777; border: 1px dashed #777777; }}
+        """
+        secondary_btn_style = f"""
+            QPushButton {{ 
+                padding: 8px; background-color: {theme.panel_bg}; border: 1px solid {theme.border}; 
+                border-radius: 4px; color: {theme.fg}; 
+            }}
+            QPushButton:hover {{ background-color: {theme.primary_bg}; border: 1px solid {theme.primary_border}; color: {theme.primary_text}; }}
+            QPushButton:disabled {{ background-color: transparent; color: #777777; border: 1px dashed #777777; }}
+        """
+        if hasattr(self, 'btn_load_file'): self.btn_load_file.setStyleSheet(secondary_btn_style)
+        if hasattr(self, 'btn_load_folder'): self.btn_load_folder.setStyleSheet(secondary_btn_style)
+        if hasattr(self, 'btn_recent_files'): self.btn_recent_files.setStyleSheet(secondary_btn_style)
+        if hasattr(self, 'btn_remove'): self.btn_remove.setStyleSheet(secondary_btn_style)
+        if hasattr(self, 'btn_merge_folder'): self.btn_merge_folder.setStyleSheet(secondary_btn_style)
+
+        # Header / Right panel
+        if hasattr(self, 'header_lbl'):
+            self.header_lbl.setStyleSheet(f"font-size: 36px; font-weight: bold; color: {theme.primary_text}; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;")
+
+        if hasattr(self, 'btn_external_apps'):
+            self.btn_external_apps.setStyleSheet(f"""
+                QPushButton {{
+                    font-weight: bold; font-size: 14px; padding: 10px 20px; 
+                    background-color: {theme.panel_bg}; color: {theme.primary_text}; 
+                    border: 2px solid {theme.primary_border}; border-radius: 6px;
+                }}
+                QPushButton:hover {{ background-color: {theme.primary_bg}; }}
+            """)
+
+        # App browser page
+        if hasattr(self, 'browser_back_btn'):
+            self.browser_back_btn.setStyleSheet(f"""
+                QPushButton {{
+                    font-weight: bold; font-size: 14px; padding: 8px 15px; 
+                    background-color: {theme.panel_bg}; color: {theme.fg}; 
+                    border: 1px solid {theme.border}; border-radius: 4px;
+                }}
+                QPushButton:hover {{
+                    background-color: {theme.primary_bg}; color: {theme.primary_text}; 
+                    border: 1px solid {theme.primary_border};
+                }}
+            """)
+        if hasattr(self, 'browser_title'):
+            self.browser_title.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {theme.primary_text};")
+        if hasattr(self, 'browser_refresh_btn'):
+            self.browser_refresh_btn.setStyleSheet(f"""
+                QPushButton {{
+                    font-weight: bold; font-size: 14px; padding: 8px 15px; 
+                    background-color: {theme.panel_bg}; color: {theme.fg}; 
+                    border: 1px solid {theme.border}; border-radius: 4px;
+                }}
+                QPushButton:hover {{
+                    background-color: {theme.primary_bg}; color: {theme.primary_text}; 
+                    border: 1px solid {theme.primary_border};
+                }}
+            """)
+        if hasattr(self, 'browser_api_docs_btn'):
+            self.browser_api_docs_btn.setStyleSheet(f"""
+                QPushButton {{
+                    font-weight: bold; font-size: 14px; padding: 8px 15px; 
+                    background-color: {theme.panel_bg}; color: {theme.fg}; 
+                    border: 1px solid {theme.border}; border-radius: 4px;
+                }}
+                QPushButton:hover {{
+                    background-color: {theme.primary_bg}; color: {theme.primary_text}; 
+                    border: 1px solid {theme.primary_border};
+                }}
+            """)
+        if hasattr(self, 'browser_create_btn'):
+            self.browser_create_btn.setStyleSheet(f"""
+                QPushButton {{
+                    font-weight: bold; font-size: 14px; padding: 8px 15px; 
+                    background-color: {theme.primary_bg}; color: {theme.primary_text}; 
+                    border: 1px solid {theme.primary_border}; border-radius: 4px;
+                }}
+                QPushButton:hover {{ border: 1px solid white; }}
+            """)
+        if hasattr(self, 'app_search_bar'):
+            self.app_search_bar.setStyleSheet(f"""
+                QLineEdit {{
+                    font-size: 14px; padding: 12px; background-color: {theme.panel_bg}; 
+                    color: {theme.fg}; border: 1px solid {theme.border}; border-radius: 6px;
+                }}
+                QLineEdit:focus {{ border: 1px solid {theme.primary_border}; }}
+            """)
+
+        # Status Bar
+        if self.statusBar():
+            self.statusBar().setStyleSheet(f"background-color: {theme.panel_bg}; color: {theme.fg}; border-top: 1px solid {theme.border};")
+        if hasattr(self, 'ram_label'):
+            self.ram_label.setStyleSheet(f"color: {theme.primary_text}; font-weight: bold; font-family: Consolas, monospace; padding-right: 15px;")
+
+        # Redraw grids
+        self._refresh_main_app_grid()
+        self._scan_external_apps()
+
+        # Propagate to open sub-windows & plugins
+        for app_win in self.open_apps:
+            if hasattr(app_win, 'apply_theme'):
+                try: app_win.apply_theme()
+                except Exception: pass
+            elif hasattr(app_win, '_apply_theme'):
+                try: app_win._apply_theme()
+                except Exception: pass
+            elif isinstance(app_win, QWidget):
+                app_win.setStyleSheet(f"background-color: {theme.bg}; color: {theme.fg};")

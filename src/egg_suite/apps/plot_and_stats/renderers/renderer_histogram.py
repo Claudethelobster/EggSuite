@@ -5,7 +5,7 @@ import matplotlib
 import re
 from PyQt6.QtWidgets import QMessageBox
 from PyQt6.QtCore import QTimer
-from ui.theme import theme
+from egg_suite.ui.theme import theme
 
 class RendererHistogram:
     @staticmethod

@@ -5,7 +5,7 @@ import html
 from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QWidget, QDialog
 from PyQt6.QtGui import QColor, QPainter, QIcon
 from PyQt6.QtCore import Qt
-from ui.theme import theme
+from egg_suite.ui.theme import theme
 
 # --- Matplotlib Imports ---
 import matplotlib

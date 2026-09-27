@@ -23,9 +23,9 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 
 # Import Theme and new Core architecture
-from ui.theme import theme
-from core.workspace import GlobalWorkspace
-from apps.hub.main_menu import HubWindow
+from egg_suite.ui.theme import theme
+from egg_suite.core.workspace import GlobalWorkspace
+from egg_suite.apps.hub.main_menu import HubWindow
 
 def main():
     # --- FIX: Tell Windows this is a unique application, not just a Python script ---

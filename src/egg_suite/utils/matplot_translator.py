@@ -8,8 +8,8 @@ from PyQt6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QDi
                              QPushButton, QDoubleSpinBox, QColorDialog, QDialogButtonBox, QLabel)
 from PyQt6.QtGui import QColor, QPainter, QIcon, QAction
 from PyQt6.QtCore import Qt, pyqtSignal
-from ui.theme import theme
-from ui.custom_widgets import ColorButton
+from egg_suite.ui.theme import theme
+from egg_suite.ui.custom_widgets import ColorButton
 
 # --- Matplotlib Imports ---
 import matplotlib

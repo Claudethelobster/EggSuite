@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QWidget, QGraphicsOpacityEffect
 )
 from PyQt6.QtGui import QPainter, QColor, QPainterPath, QFontMetrics
-from ui.theme import theme
+from egg_suite.ui.theme import theme
 
 
 
@@ -21,7 +21,7 @@ class ToastNotification(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         
-        from ui.theme import theme
+        from egg_suite.ui.theme import theme
         bg_color = theme.danger_bg if is_error else theme.success_bg
         border_color = theme.danger_border if is_error else theme.success_border
         text_color = theme.danger_text if is_error else theme.success_text
@@ -627,7 +627,7 @@ class LegendCustomizationDialog(QDialog):
         bg_col = main_window.bg_color_combo.currentText()
         self.preview_widget.setBackground(bg_col if bg_col != "Transparent" else "w")
         
-        from ui.custom_widgets import CustomLegendItem
+        from egg_suite.ui.custom_widgets import CustomLegendItem
         self.preview_legend = CustomLegendItem(offset=(10, 10))
         self.preview_legend.setParentItem(self.preview_widget.ci)
         layout.addWidget(self.preview_widget)
@@ -709,63 +709,114 @@ class LegendCustomizationDialog(QDialog):
     def get_result(self):
         return self.aliases, self.group_cb.isChecked()
     
+def render_mathtext_to_qpixmap(latex_str: str, text_color="white", bg_color=None, font_size=12, dpi=120):
+    """Renders a LaTeX / MathText string into a crisp PyQt6 QPixmap."""
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from PyQt6.QtGui import QPixmap
+
+    clean_str = latex_str.strip()
+    if not clean_str:
+        return None
+
+    # Wrap in math delimiters if not already present
+    if "$" not in clean_str:
+        clean_str = f"${clean_str}$"
+
+    try:
+        fig = plt.figure(figsize=(0.01, 0.01), dpi=dpi)
+        fig.patch.set_alpha(0.0)
+        t_color = text_color if text_color in ("white", "black") else ("white" if "white" in text_color else "black")
+        text_obj = fig.text(0, 0, clean_str, fontsize=font_size, color=t_color)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", pad_inches=0.04, transparent=True)
+        plt.close(fig)
+        buf.seek(0)
+        pix = QPixmap()
+        pix.loadFromData(buf.getvalue())
+        return pix
+    except Exception as e:
+        return None
+
+
 class RichTextAxisLabelDialog(QDialog):
+    """Enhanced LaTeX & MathText Axis Label Editor with symbol palette and live rendering."""
+
     def __init__(self, orientation, current_raw_text, main_window):
         super().__init__(main_window)
-        self.setWindowTitle(f"Edit {orientation.capitalize()} Axis Label")
-        self.setMinimumWidth(450)
+        self.setWindowTitle(f"Edit {orientation.capitalize()} Axis Label (LaTeX & MathText)")
+        self.resize(550, 480)
         self.main_window = main_window
         self.parsed_html = current_raw_text
 
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("<b>Enter Custom Axis Label:</b>"))
-        layout.addWidget(QLabel("<i>Tip: Use ^ for superscripts (m/s^2), _ for subscripts (x_0), and {alpha} for Greek.</i>"))
+        layout.addWidget(QLabel("<b>Enter Axis Label:</b>"))
+        layout.addWidget(QLabel("<i>Supports standard LaTeX ($...$), powers (^2), indices (_0), and fractions (\\frac{a}{b}).</i>"))
 
         input_lay = QHBoxLayout()
         self.input_edit = QLineEdit(current_raw_text)
         self.input_edit.textChanged.connect(self.update_preview)
         input_lay.addWidget(self.input_edit)
 
-        self.const_btn = QPushButton("✨ Insert Constant")
+        self.const_btn = QPushButton("✨ Constant")
         self.const_btn.clicked.connect(self.open_constants)
         input_lay.addWidget(self.const_btn)
         layout.addLayout(input_lay)
 
-        layout.addSpacing(10)
-        layout.addWidget(QLabel("<b>Live Preview:</b>"))
+        # Quick-insert Symbol Toolbar
+        sym_box = QGroupBox("Quick-Insert Symbols & Math Operators")
+        sym_lay = QVBoxLayout(sym_box)
+
+        # Row 1: Greek Letters
+        row1 = QHBoxLayout()
+        greek_symbols = ["α", "β", "γ", "δ", "ε", "θ", "λ", "μ", "π", "σ", "ω", "Δ", "Ω"]
+        for sym in greek_symbols:
+            btn = QPushButton(sym)
+            btn.setFixedWidth(30)
+            btn.clicked.connect(lambda _, s=sym: self._insert_text(s))
+            row1.addWidget(btn)
+        row1.addStretch()
+        sym_lay.addLayout(row1)
+
+        # Row 2: Math Helpers
+        row2 = QHBoxLayout()
+        math_helpers = [
+            ("x²", "^2"), ("x₀", "_0"), ("±", r"\pm "), ("≈", r"\approx "),
+            ("·", r"\cdot "), ("√x", r"\sqrt{x}"), ("a/b", r"\frac{a}{b}"), ("Δt", r"\Delta t"), ("µV", r"\mu\mathrm{V}")
+        ]
+        for label, tag in math_helpers:
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _, t=tag: self._insert_text(t))
+            row2.addWidget(btn)
+        row2.addStretch()
+        sym_lay.addLayout(row2)
+
+        layout.addWidget(sym_box)
+
+        layout.addSpacing(6)
+        layout.addWidget(QLabel("<b>Live Rendered Preview:</b>"))
 
         self.preview_label = QLabel()
-        # PyQt6 Update: AlignmentFlag
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumHeight(65)
 
-        font_family = main_window.font_family_combo.currentFont().family()
-        try: label_size = int(main_window.label_fontsize_edit.text())
-        except ValueError: label_size = 14
-        
-        bg_color = main_window.bg_color_combo.currentText()
-        if bg_color == "Black":
-            box_bg, text_color = "#222", "white"
-        else:
-            box_bg, text_color = "white", "black"
-
-        self.preview_label.setStyleSheet(f"background-color: {box_bg}; color: {text_color}; border: 1px solid #aaa; padding: 15px;")
-        
-        # Pull QFont directly from PyQt6.QtGui now
-        from PyQt6.QtGui import QFont
-        self.preview_label.setFont(QFont(font_family, label_size))
+        bg_color = main_window.bg_color_combo.currentText() if hasattr(main_window, "bg_color_combo") else "Black"
+        box_bg, text_color = ("#222", "white") if bg_color == "Black" else ("white", "black")
+        self.preview_label.setStyleSheet(f"background-color: {box_bg}; color: {text_color}; border: 1px solid #aaa; padding: 10px; border-radius: 4px;")
         layout.addWidget(self.preview_label)
 
         btn_box = QHBoxLayout()
-        
         clear_btn = QPushButton("Revert to Default")
         clear_btn.setStyleSheet("color: #d90000;")
         clear_btn.clicked.connect(self._clear_and_accept)
-        
-        ok_btn = QPushButton("Apply")
-        ok_btn.setStyleSheet("font-weight: bold; color: #0055ff; padding: 6px;")
+
+        ok_btn = QPushButton("Apply Label")
+        ok_btn.setStyleSheet("font-weight: bold; background-color: #0055ff; color: white; padding: 6px 16px;")
         ok_btn.clicked.connect(self.accept)
-        
+
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
 
@@ -777,37 +828,52 @@ class RichTextAxisLabelDialog(QDialog):
 
         self.update_preview(current_raw_text)
 
+    def _insert_text(self, text):
+        self.input_edit.insert(text)
+
     def _clear_and_accept(self):
         self.input_edit.setText("")
         self.accept()
 
     def open_constants(self):
-        from ui.dialogs.data_mgmt import ConstantsDialog
+        from egg_suite.ui.dialogs.data_mgmt import ConstantsDialog
         dlg = ConstantsDialog(self)
-        # PyQt6 Update: DialogCode
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_key:
-            self.input_edit.insert(f"{{\\{dlg.selected_key}}}")
+            self.input_edit.insert(f"\\{{{dlg.selected_key}}}")
 
     def update_preview(self, text):
-        html_text = text
         import re
-        
-        def const_repl(m):
-            c_key = m.group(1)
-            # Make sure PHYSICS_CONSTANTS is accessible or imported here if needed!
-            return f"\\{{{c_key}}}"
-        html_text = re.sub(r'\{\\(.*?)\}', const_repl, html_text)
+        raw_text = text.strip()
+        if not raw_text:
+            self.preview_label.setText("<i>(Default Auto Label)</i>")
+            self.parsed_html = ""
+            return
 
-        def param_repl(m):
-            p_key = m.group(1)
-            return p_key
-        html_text = re.sub(r'\{(.*?)\}', param_repl, html_text)
+        # Attempt MathText rendering first
+        bg_color = self.main_window.bg_color_combo.currentText() if hasattr(self.main_window, "bg_color_combo") else "Black"
+        t_color = "white" if bg_color == "Black" else "black"
+        pix = render_mathtext_to_qpixmap(raw_text, text_color=t_color, font_size=13)
 
-        html_text = re.sub(r'\^([\w\.\-]+)', r'<sup>\1</sup>', html_text)
-        html_text = re.sub(r'_([\w\.\-]+)', r'<sub>\1</sub>', html_text)
-
-        self.preview_label.setText(html_text)
-        self.parsed_html = html_text
+        if pix and not pix.isNull():
+            self.preview_label.setPixmap(pix)
+            self.parsed_html = raw_text
+        else:
+            # HTML fallback with superscript and subscript regex
+            html = raw_text
+            html = re.sub(r'\^([\w\.\-]+)', r'<sup>\1</sup>', html)
+            html = re.sub(r'_([\w\.\-]+)', r'<sub>\1</sub>', html)
+            self.preview_label.setText(html)
+            self.parsed_html = html
 
     def get_result(self):
         return self.input_edit.text().strip(), self.parsed_html
+
+
+class DraggableCanvasAnnotation(pg.TextItem):
+    """Movable, interactive LaTeX / text callout placed directly on 2D plots."""
+    def __init__(self, text: str = "Annotation", pos=(0, 0), **kwargs):
+        super().__init__(text=text, anchor=(0, 1), **kwargs)
+        self.setPos(pos[0], pos[1])
+        self.setText(text)
+        self.setFlag(pg.GraphicsObject.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(pg.GraphicsObject.GraphicsItemFlag.ItemIsSelectable, True)

@@ -18,14 +18,14 @@ from PyQt6.QtWidgets import (
 )
 
 # Core imports
-from core.data_loader import DataLoaderThread, CSVDataset, Dataset, BADGERLOOP_AVAILABLE
-from apps.plot_and_stats.plot_worker import PlotWorkerThread, BackgroundWorker
-from core.constants import PHYSICS_CONSTANTS, GREEK_MAP
-from ui.theme import theme
-from core.file_editor import FileEditor
+from egg_suite.core.data_loader import DataLoaderThread, CSVDataset, Dataset, BADGERLOOP_AVAILABLE
+from egg_suite.apps.plot_and_stats.plot_worker import PlotWorkerThread, BackgroundWorker
+from egg_suite.core.constants import PHYSICS_CONSTANTS, GREEK_MAP
+from egg_suite.ui.theme import theme
+from egg_suite.core.file_editor import FileEditor
 
 # UI Component imports
-from ui.custom_widgets import (
+from egg_suite.ui.custom_widgets import (
     CustomAxisItem, DraggableLabel, CustomLegendItem, TraceSettingsDialog,
     RichTextAxisLabelDialog, LegendCustomizationDialog, GLRichTextItem
 )
@@ -35,24 +35,24 @@ try:
     OPENGL_AVAILABLE = True
 except Exception:
     OPENGL_AVAILABLE = False
-from ui.dialogs.data_mgmt import (
+from egg_suite.ui.dialogs.data_mgmt import (
     FileImportDialog, SweepTableDialog, ManageColumnsDialog, 
     MetadataDialog, CreateColumnDialog, CopyableErrorDialog,
     TemplateSelectionDialog   
 )
-from apps.plot_and_stats.analysis import (SignalProcessingDialog, PhaseSpaceDialog, PeakFinderTool,
+from egg_suite.apps.plot_and_stats.analysis import (SignalProcessingDialog, PhaseSpaceDialog, PeakFinderTool,
                                  LoopAreaDialog, BaselineSubtractionDialog, AreaUnderCurveDialog,
                                  SpectrogramDialog, DataSlicerDialog
 )
-from apps.plot_and_stats.fitting import (
+from egg_suite.apps.plot_and_stats.fitting import (
     FitFunctionDialog, CustomFitDialog, MultiFitManagerDialog, FitDataToFunctionWindow
 )
-from ui.dialogs.help import HelpDialog
-from ui.custom_widgets import ToastNotification
+from egg_suite.ui.dialogs.help import HelpDialog
+from egg_suite.ui.custom_widgets import ToastNotification
 
-from apps.settings.settings import PreferencesDialog
-from apps.plot_and_stats.analysis_hist import SmartBinningDialog, CDFOverlayDialog, SigmaClippingDialog
-from core.history_engine import EggCommand
+from egg_suite.apps.settings.settings import PreferencesDialog
+from egg_suite.apps.plot_and_stats.analysis_hist import SmartBinningDialog, CDFOverlayDialog, SigmaClippingDialog
+from egg_suite.core.history_engine import EggCommand
 
 class HistoryTreeWindow(QDialog):
     def __init__(self, main_window):
@@ -200,6 +200,7 @@ class BadgerLoopQtGraph(QMainWindow):
         # --- FIX: INITIALISE THE THEME ENGINE BEFORE BUILDING THE UI ---
         is_dark = self.settings.value("dark_mode", False, bool)
         theme.update(is_dark)
+        theme.theme_changed.connect(self._apply_theme)
         # ---------------------------------------------------------------
         
         self.dataset = None
@@ -1795,6 +1796,12 @@ class BadgerLoopQtGraph(QMainWindow):
         # Fitting Menu (Saved as self so we can dynamically rebuild it)
         self.fitting_menu = menubar.addMenu("Fitting")
         
+        # Tools Menu
+        tools_menu = menubar.addMenu("Tools")
+        tools_menu.addAction("🚀 Batch Processing Wizard...").triggered.connect(self.open_batch_wizard)
+        tools_menu.addAction("📊 Statistical Testing Suite...").triggered.connect(self.open_stats_suite)
+        tools_menu.addAction("✨ Add LaTeX Annotation to Plot").triggered.connect(self.prompt_add_latex_annotation)
+
         self._update_context_menus()
 
         # Plot Mode Menu
@@ -1974,7 +1981,7 @@ class BadgerLoopQtGraph(QMainWindow):
             if hasattr(self, 'history_window') and self.history_window.isVisible():
                 self.history_window._refresh_timeline_ui()
 
-        from core.data_loader import DataLoaderThread
+        from egg_suite.core.data_loader import DataLoaderThread
         self.loader_thread = DataLoaderThread(target_file, opts)
         self.loader_thread.progress.connect(self._update_progress_ui)
         self.loader_thread.finished.connect(on_refresh_done)
@@ -2222,7 +2229,7 @@ class BadgerLoopQtGraph(QMainWindow):
         self._show_actual_piecewise_dialog()
 
     def _show_actual_piecewise_dialog(self):
-        from ui.dialogs.data_mgmt import PiecewisePropagationDialog
+        from egg_suite.ui.dialogs.data_mgmt import PiecewisePropagationDialog
         dlg = PiecewisePropagationDialog(self.dataset, self)
         if dlg.exec() != QDialog.DialogCode.Accepted: return
         
@@ -2397,7 +2404,7 @@ class BadgerLoopQtGraph(QMainWindow):
             return
 
         # --- SCENARIO 2: They are editing a full Folder (MultiCSV) ---
-        from ui.dialogs.data_mgmt import FolderEditChoiceDialog
+        from egg_suite.ui.dialogs.data_mgmt import FolderEditChoiceDialog
         choice = FolderEditChoiceDialog(self).exec()
         if choice == 0: return 
         
@@ -2507,7 +2514,7 @@ class BadgerLoopQtGraph(QMainWindow):
                 # 3. Resume whatever math tool you were originally trying to open
                 callback() 
                 
-            from core.data_loader import DataLoaderThread
+            from egg_suite.core.data_loader import DataLoaderThread
             self.loader_thread = DataLoaderThread(mirror_folder_path, opts)
             self.loader_thread.progress.connect(self._update_progress_ui)
             self.loader_thread.finished.connect(on_mirror_loaded)
@@ -2770,7 +2777,7 @@ class BadgerLoopQtGraph(QMainWindow):
         self.progress_dlg.setMinimumDuration(0) 
         self.progress_dlg.setValue(0)
 
-        from apps.plot_and_stats.fitting import CommonFitWorker
+        from egg_suite.apps.plot_and_stats.fitting import CommonFitWorker
         self.common_worker = CommonFitWorker(func_type, degree_text, log_base_text, param_config, x, y, y_err, x_err)
         self.common_worker.progress.connect(lambda val, txt: (self.progress_dlg.setValue(val), self.progress_dlg.setLabelText(txt)))
 
@@ -2817,7 +2824,7 @@ class BadgerLoopQtGraph(QMainWindow):
         def on_error(err_str):
             self.progress_dlg.hide()
             self.progress_dlg.deleteLater()
-            from ui.dialogs.data_mgmt import CopyableErrorDialog
+            from egg_suite.ui.dialogs.data_mgmt import CopyableErrorDialog
             CopyableErrorDialog("Fitting Error", "Optimization failed.", "The parameters failed to converge. Try adjusting your Initial Guesses.\n\n" + err_str, self).exec()
 
         self.common_worker.finished.connect(on_success)
@@ -2954,7 +2961,7 @@ class BadgerLoopQtGraph(QMainWindow):
         def on_error(err_str):
             self.progress_dlg.hide()
             self.progress_dlg.deleteLater()
-            from ui.dialogs.data_mgmt import CopyableErrorDialog
+            from egg_suite.ui.dialogs.data_mgmt import CopyableErrorDialog
             CopyableErrorDialog("Evaluation Error", "Processing failed.", err_str, self).exec()
 
         self.eval_worker.finished.connect(on_eval_success)
@@ -2966,7 +2973,7 @@ class BadgerLoopQtGraph(QMainWindow):
     def open_custom_fit_3d_dialog(self):
         if not self.dataset: return
         
-        from apps.plot_and_stats.fitting_3d import CustomFit3DDialog
+        from egg_suite.apps.plot_and_stats.fitting_3d import CustomFit3DDialog
         from PyQt6.QtWidgets import QDialog
         import numpy as np
         
@@ -3281,7 +3288,7 @@ class BadgerLoopQtGraph(QMainWindow):
                 remove_band_safe(fit)
                 self.fit_legend.removeItem(fit["plot_item"])
         else:
-            from apps.plot_and_stats.fitting import MultiFitManagerDialog
+            from egg_suite.apps.plot_and_stats.fitting import MultiFitManagerDialog
             dlg = MultiFitManagerDialog(active_list, "Delete", self)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 res_type, idx = dlg.get_selection()
@@ -3319,7 +3326,7 @@ class BadgerLoopQtGraph(QMainWindow):
         if len(active_list) == 1:
             fit = active_list[0]
         else:
-            from apps.plot_and_stats.fitting import MultiFitManagerDialog
+            from egg_suite.apps.plot_and_stats.fitting import MultiFitManagerDialog
             dlg = MultiFitManagerDialog(active_list, "Save", self)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 _, idx = dlg.get_selection()
@@ -3392,7 +3399,7 @@ class BadgerLoopQtGraph(QMainWindow):
         if len(active_list) == 1:
             fit = active_list[0]
         else:
-            from apps.plot_and_stats.fitting import MultiFitManagerDialog
+            from egg_suite.apps.plot_and_stats.fitting import MultiFitManagerDialog
             dlg = MultiFitManagerDialog(active_list, "Export CSV", self)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 _, idx = dlg.get_selection()
@@ -3441,7 +3448,7 @@ class BadgerLoopQtGraph(QMainWindow):
         if len(self.active_fits) == 1:
             fit = self.active_fits[0]
         else:
-            from apps.plot_and_stats.fitting import MultiFitManagerDialog
+            from egg_suite.apps.plot_and_stats.fitting import MultiFitManagerDialog
             dlg = MultiFitManagerDialog(self.active_fits, "Export", self)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 _, idx = dlg.get_selection()
@@ -3601,7 +3608,7 @@ class BadgerLoopQtGraph(QMainWindow):
         
     def open_fit_3d_surface_dialog(self):
         if not self.dataset: return
-        from apps.plot_and_stats.fitting_3d import Fit3DSurfaceDialog, execute_3d_surface_fit
+        from egg_suite.apps.plot_and_stats.fitting_3d import Fit3DSurfaceDialog, execute_3d_surface_fit
         
         dlg = Fit3DSurfaceDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted: return
@@ -3627,7 +3634,7 @@ class BadgerLoopQtGraph(QMainWindow):
         try:
             final_params, param_names, model_callable, pcov = execute_3d_surface_fit(pts, func_type, param_config, degree)
         except Exception as e:
-            from ui.dialogs.data_mgmt import CopyableErrorDialog
+            from egg_suite.ui.dialogs.data_mgmt import CopyableErrorDialog
             CopyableErrorDialog("Fitting Error", "Optimization failed.", str(e), self).exec()
             return
 
@@ -4416,7 +4423,7 @@ class BadgerLoopQtGraph(QMainWindow):
         
     def _popout_matplotlib(self):
         try:
-            from external_modules.matplot_translator import MatplotlibPopout
+            from egg_suite.utils.matplot_translator import MatplotlibPopout
             # Pass the whole window so the popout can read the UI settings
             self._mpl_popout = MatplotlibPopout(self) 
             self._mpl_popout.show()
@@ -4564,7 +4571,7 @@ class BadgerLoopQtGraph(QMainWindow):
         group_sweeps = False if is_fit_legend else getattr(self, 'group_sweeps_legend', False)
         
         # 3. Open the customisation dialog
-        from ui.custom_widgets import LegendCustomizationDialog
+        from egg_suite.ui.custom_widgets import LegendCustomizationDialog
         from PyQt6.QtWidgets import QDialog
         
         dlg = LegendCustomizationDialog(self, entries, current_aliases, group_sweeps, is_fit_legend=is_fit_legend)
@@ -4606,7 +4613,7 @@ class BadgerLoopQtGraph(QMainWindow):
         
         if self.plot_mode == "3D":
             if not hasattr(self, 'crosshair_3d'):
-                from apps.plot_and_stats.analysis_3d import Crosshair3DManager
+                from egg_suite.apps.plot_and_stats.analysis_3d import Crosshair3DManager
                 self.crosshair_3d = Crosshair3DManager(self)
             self.crosshair_3d.toggle()
             
@@ -4769,7 +4776,7 @@ class BadgerLoopQtGraph(QMainWindow):
         if len(active_list) == 1:
             fit = active_list[0]
         else:
-            from apps.plot_and_stats.fitting import MultiFitManagerDialog
+            from egg_suite.apps.plot_and_stats.fitting import MultiFitManagerDialog
             dlg = MultiFitManagerDialog(active_list, "View", self)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 _, idx = dlg.get_selection()
@@ -4783,7 +4790,7 @@ class BadgerLoopQtGraph(QMainWindow):
         coeff_str = ""
         math_style = "font-size: 20px; font-family: Cambria, serif; font-style: italic;"
 
-        from core.constants import GREEK_MAP
+        from egg_suite.core.constants import GREEK_MAP
 
         if ftype == "Polynomial":
             degree = fit.get("degree", 1)
@@ -5010,7 +5017,7 @@ class BadgerLoopQtGraph(QMainWindow):
                 calc_btn.setText("Evaluating Dataset...")
 
                 from PyQt6.QtWidgets import QProgressDialog
-                from apps.plot_and_stats.fitting import calculate_fit_statistics
+                from egg_suite.apps.plot_and_stats.fitting import calculate_fit_statistics
 
                 dlg.stat_prog = QProgressDialog("Calculating standard errors and variance...", None, 0, 0, dlg)
                 dlg.stat_prog.setWindowTitle("Heavy Calculation")
@@ -5763,7 +5770,7 @@ class BadgerLoopQtGraph(QMainWindow):
                     if self.file_type in ["MultiCSV", "CSV", "ConcatenatedCSV"]:
                         # Intercept directories and force them to MultiCSV
                         if self.file_type == "MultiCSV" or os.path.isdir(self.last_file):
-                            from core.data_loader import MultiCSVDataset
+                            from egg_suite.core.data_loader import MultiCSVDataset
                             self.dataset = MultiCSVDataset(
                                 self.last_file, 
                                 file_list=self.last_load_opts.get("file_list", []), 
@@ -5773,7 +5780,7 @@ class BadgerLoopQtGraph(QMainWindow):
                             if hasattr(self, 'workspace') and self.workspace is not None:
                                 self.workspace.add_folder(self.last_file, self.dataset)
                         else:
-                            from core.data_loader import CSVDataset
+                            from egg_suite.core.data_loader import CSVDataset
                             self.dataset = CSVDataset(
                                 self.last_file,
                                 self.last_load_opts.get("delimiter", ","),
@@ -5783,7 +5790,7 @@ class BadgerLoopQtGraph(QMainWindow):
                                 self.workspace.add_single_file(self.last_file, self.dataset)
                     
                     elif self.file_type == "HDF5":
-                        from core.data_loader import HDF5Dataset
+                        from egg_suite.core.data_loader import HDF5Dataset
                         self.dataset = HDF5Dataset(self.last_file)
                         if hasattr(self, 'workspace') and self.workspace is not None:
                             self.workspace.add_single_file(self.last_file, self.dataset)
@@ -5791,7 +5798,7 @@ class BadgerLoopQtGraph(QMainWindow):
                     else: 
                         if os.path.isdir(self.last_file):
                             raise IsADirectoryError("Expected a BadgerLoop file but got a directory.")
-                        from core.data_loader import Dataset
+                        from egg_suite.core.data_loader import Dataset
                         self.dataset = Dataset(self.last_file)
                         if hasattr(self, 'workspace') and self.workspace is not None:
                             self.workspace.add_single_file(self.last_file, self.dataset)
@@ -6475,19 +6482,19 @@ class BadgerLoopQtGraph(QMainWindow):
         else: CopyableErrorDialog("Plotting Error", "An error occurred while mathematically processing the data:", err_msg, self).exec()
 
     def _draw_2d(self, packages, show_legend):
-        from apps.plot_and_stats.renderers.renderer_2d import Renderer2D
+        from egg_suite.apps.plot_and_stats.renderers.renderer_2d import Renderer2D
         Renderer2D.draw(self, packages, show_legend)
             
     def _draw_histogram(self, packages, show_legend=True):
-        from apps.plot_and_stats.renderers.renderer_histogram import RendererHistogram
+        from egg_suite.apps.plot_and_stats.renderers.renderer_histogram import RendererHistogram
         RendererHistogram.draw(self, packages, show_legend)
 
     def _draw_3d(self, all_pts_raw, bounds):
-        from apps.plot_and_stats.renderers.renderer_3d import Renderer3D
+        from egg_suite.apps.plot_and_stats.renderers.renderer_3d import Renderer3D
         Renderer3D.draw(self, all_pts_raw, bounds)
 
     def _draw_heatmap(self, res_dict):
-        from apps.plot_and_stats.renderers.heatmap_renderer import HeatmapRenderer
+        from egg_suite.apps.plot_and_stats.renderers.heatmap_renderer import HeatmapRenderer
         HeatmapRenderer.draw(self, res_dict)
             
     def save_plot(self):
@@ -6973,7 +6980,7 @@ class BadgerLoopQtGraph(QMainWindow):
         if len(res) < 4 or len(res[1]) == 0: return
         _, y_data, _, _ = res 
         
-        from apps.plot_and_stats.analysis_hist import SmartBinningDialog
+        from egg_suite.apps.plot_and_stats.analysis_hist import SmartBinningDialog
         dlg = SmartBinningDialog(y_data, self.bins_edit.text(), self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.bins_edit.setText(dlg.get_result())
@@ -6984,7 +6991,7 @@ class BadgerLoopQtGraph(QMainWindow):
         if len(res) < 4 or len(res[1]) == 0: return
         _, y_data, _, pair = res
         
-        from apps.plot_and_stats.analysis_hist import CDFOverlayDialog
+        from egg_suite.apps.plot_and_stats.analysis_hist import CDFOverlayDialog
         dlg = CDFOverlayDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             color, thickness = dlg.get_result()
@@ -7029,7 +7036,7 @@ class BadgerLoopQtGraph(QMainWindow):
         if len(res) < 4 or len(res[1]) == 0: return
         _, y_data, _, pair = res
         
-        from apps.plot_and_stats.analysis_hist import SigmaClippingDialog
+        from egg_suite.apps.plot_and_stats.analysis_hist import SigmaClippingDialog
         dlg = SigmaClippingDialog(y_data, self)
         
         if dlg.exec() != QDialog.DialogCode.Accepted: return
@@ -7139,7 +7146,7 @@ class BadgerLoopQtGraph(QMainWindow):
                 self._execute_sigma_clipping(new_name, calculated_blocks) 
             # ---------------------------------------------------------------
 
-            from core.data_loader import DataLoaderThread
+            from egg_suite.core.data_loader import DataLoaderThread
             self.loader_thread = DataLoaderThread(target_file, opts)
             self.loader_thread.progress.connect(self._update_progress_ui)
             self.loader_thread.finished.connect(on_mirror_loaded)
@@ -7178,7 +7185,7 @@ class BadgerLoopQtGraph(QMainWindow):
             self.update_current_series()
         # ---------------------------------------------------------------
         
-        from core.data_loader import DataLoaderThread
+        from egg_suite.core.data_loader import DataLoaderThread
         self.loader_thread = DataLoaderThread(target_file, opts)
         self.loader_thread.progress.connect(self._update_progress_ui)
         self.loader_thread.finished.connect(on_refresh_done)
@@ -7188,7 +7195,7 @@ class BadgerLoopQtGraph(QMainWindow):
     def open_3d_volume_integrator(self):
         """Lazily loads and triggers the 3D volume integration math engine."""
         if not hasattr(self, 'volume_integrator_3d'):
-            from apps.plot_and_stats.analysis_3d import VolumeIntegrator3D
+            from egg_suite.apps.plot_and_stats.analysis_3d import VolumeIntegrator3D
             self.volume_integrator_3d = VolumeIntegrator3D(self)
             
         self.volume_integrator_3d.calculate_volume()
@@ -7207,6 +7214,7 @@ class BadgerLoopQtGraph(QMainWindow):
             self.analysis_menu.addAction("Signal Processing (Smooth / Calculus)").triggered.connect(self.open_signal_processing)
             self.analysis_menu.addAction("Baseline Subtraction Tool").triggered.connect(self.open_baseline_subtraction)
             self.analysis_menu.addAction("Phase Space Generator (x vs dx/dt)").triggered.connect(self.open_phase_space_dialog)
+            self.analysis_menu.addAction("📊 Statistical Testing & Distributions...").triggered.connect(self.open_stats_suite)
             self.analysis_menu.addSeparator()
             
             fourier_menu = self.analysis_menu.addMenu("Fourier Analysis")
@@ -7221,6 +7229,7 @@ class BadgerLoopQtGraph(QMainWindow):
             self.fitting_menu.addAction("Fit common function to data").triggered.connect(self.open_fit_function_dialog)
             self.fitting_menu.addAction("Fit custom function to data").triggered.connect(self.open_custom_fit_dialog)
             self.fitting_menu.addAction("Fit data to function").triggered.connect(self.open_fit_data_to_function)
+            self.fitting_menu.addAction("⚡ Multi-Peak Deconvolution...").triggered.connect(self.open_multi_peak_deconvolution)
 
         elif mode == "3D":
             # --- 3D ANALYSIS ---
@@ -7250,3 +7259,64 @@ class BadgerLoopQtGraph(QMainWindow):
             # --- HISTOGRAM FITTING ---
             self.fitting_menu.addAction("Fit Probability Density Function (PDF)").triggered.connect(lambda: print("Launch PDF Fit"))
             self.fitting_menu.addAction("Fit Gaussian / Normal Distribution").triggered.connect(lambda: print("Launch Gauss Fit"))
+
+    def open_batch_wizard(self):
+        """Opens the Batch Processing Wizard dialog."""
+        from egg_suite.ui.dialogs.batch_wizard_dialog import BatchWizardDialog
+        dlg = BatchWizardDialog(self)
+        dlg.exec()
+
+    def open_stats_suite(self):
+        """Opens the Statistical Testing & Distribution Suite dialog."""
+        from egg_suite.ui.dialogs.stats_dialog import StatisticalAnalysisDialog
+        dlg = StatisticalAnalysisDialog(self)
+        dlg.exec()
+
+    def open_multi_peak_deconvolution(self):
+        """Opens the interactive Multi-Peak Deconvolution & Fitting dialog."""
+        from egg_suite.ui.dialogs.multi_peak_dialog import MultiPeakDeconvolutionDialog
+        dlg = MultiPeakDeconvolutionDialog(self)
+        dlg.exec()
+
+    def prompt_add_latex_annotation(self):
+        """Prompts for a LaTeX formula and places a draggable annotation box on the canvas."""
+        from PyQt6.QtWidgets import QInputDialog, QLineEdit
+        from egg_suite.ui.custom_widgets import DraggableCanvasAnnotation
+        
+        text, ok = QInputDialog.getText(
+            self, "Add LaTeX Annotation",
+            "Enter LaTeX math or text to place on plot:\n(e.g. $T_c = 142.5\\,\\mathrm{K}$ or $\\Delta V / \\Delta t$)",
+            QLineEdit.EchoMode.Normal, "$y = f(x)$"
+        )
+        if ok and text.strip():
+            # Place at center of current view
+            vb = self.plot_widget.getViewBox()
+            center = vb.viewRect().center()
+            annotation = DraggableCanvasAnnotation(text=text.strip(), pos=(center.x(), center.y()), color=(255, 255, 255))
+            self.plot_widget.addItem(annotation)
+
+    def get_active_xy(self):
+        """Extracts currently selected active X and Y numpy arrays."""
+        if hasattr(self, 'dataset') and self.dataset and getattr(self.dataset, 'data', None) is not None:
+            d = self.dataset.data
+            if d.ndim > 1 and d.shape[1] >= 2:
+                x_idx = self.x_combo.currentIndex() if hasattr(self, 'x_combo') else 0
+                y_idx = self.y_combo.currentIndex() if hasattr(self, 'y_combo') else 1
+                x_idx = max(0, min(x_idx, d.shape[1] - 1))
+                y_idx = max(0, min(y_idx, d.shape[1] - 1))
+                return d[:, x_idx].astype(float), d[:, y_idx].astype(float)
+        return np.linspace(0, 10, 100), np.zeros(100)
+
+    def _apply_theme(self, is_dark=None):
+        """Dynamically updates Plot & Stats colors and plot canvas background."""
+        self.setStyleSheet(f"background-color: {theme.bg}; color: {theme.fg};")
+        if hasattr(self, 'plot_widget') and self.plot_widget:
+            self.plot_widget.setBackground(theme.panel_bg)
+        if hasattr(self, 'gl_widget') and self.gl_widget:
+            try: self.gl_widget.setBackgroundColor(theme.panel_bg)
+            except Exception: pass
+        if hasattr(self, 'plot_data'):
+            try: self.plot_data()
+            except Exception: pass
+
+

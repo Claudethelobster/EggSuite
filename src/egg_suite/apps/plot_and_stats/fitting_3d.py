@@ -8,12 +8,12 @@ from PyQt6.QtWidgets import (
     QComboBox, QLineEdit, QLabel, QPushButton, QTableWidget, QHeaderView,
     QScrollArea, QWidget, QTextEdit, QInputDialog
 )
-from ui.theme import theme
+from egg_suite.ui.theme import theme
 from scipy.optimize import curve_fit
 import warnings
-from core.constants import PHYSICS_CONSTANTS, GREEK_MAP
-from ui.dialogs.data_mgmt import ConstantsDialog
-from apps.plot_and_stats.fitting import LocalWorker, calculate_fit_statistics
+from egg_suite.core.constants import PHYSICS_CONSTANTS, GREEK_MAP
+from egg_suite.ui.dialogs.data_mgmt import ConstantsDialog
+from egg_suite.apps.plot_and_stats.fitting import LocalWorker, calculate_fit_statistics
 
 class Fit3DSurfaceDialog(QDialog):
     def __init__(self, parent_gui):

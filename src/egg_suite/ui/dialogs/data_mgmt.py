@@ -12,9 +12,9 @@ from PyQt6.QtWidgets import (
     QTableView, QScrollArea, QMessageBox, QSpinBox, QListWidget, QListWidgetItem
 )
 
-from core.constants import PHYSICS_CONSTANTS
-from ui.theme import theme
-from core.data_loader import BADGERLOOP_AVAILABLE
+from egg_suite.core.constants import PHYSICS_CONSTANTS
+from egg_suite.ui.theme import theme
+from egg_suite.core.data_loader import BADGERLOOP_AVAILABLE
 
 class CopyableErrorDialog(QDialog):
     def __init__(self, title, header, details, parent=None):
@@ -684,7 +684,7 @@ class MetadataDialog(QDialog):
         filepath = self.dataset.file_list[idx]
         
         try:
-            from core.data_loader import CSVDataset
+            from egg_suite.core.data_loader import CSVDataset
             delim = getattr(self.parent_gui, 'last_load_opts', {}).get("delimiter", ",")
             has_header = getattr(self.parent_gui, 'last_load_opts', {}).get("has_header", True)
             single_ds = CSVDataset(filepath, delimiter=delim, has_header=has_header)

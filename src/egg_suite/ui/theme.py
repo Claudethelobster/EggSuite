@@ -1,9 +1,23 @@
-class ThemeManager:
-    def __init__(self):
-        self.is_dark = False
-        self.update(False)
+"""
+theme.py - Dynamic Theme Engine and Palette Manager for EggSuite.
+Supports real-time theme switching without restarting the application.
+"""
 
-    def update(self, is_dark):
+from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtGui import QPalette, QColor
+from PyQt6.QtWidgets import QApplication
+
+
+class ThemeManager(QObject):
+    """Manages the global color palette and broadcasts real-time theme change signals."""
+    theme_changed = pyqtSignal(bool)
+
+    def __init__(self):
+        super().__init__()
+        self.is_dark = False
+        self._set_colors(False)
+
+    def _set_colors(self, is_dark: bool):
         self.is_dark = is_dark
         if is_dark:
             # Dark Mode Palette
@@ -50,5 +64,45 @@ class ThemeManager:
             self.warning_bg = "#fff0d0"
             self.warning_border = "#ffaa00"
 
-# Global singleton so all dialogs can import and read the same colors
+    def apply_to_application(self, app: QApplication = None):
+        """Pushes current theme palette and pyqtgraph configuration to Qt application."""
+        if app is None:
+            app = QApplication.instance()
+        if not app:
+            return
+
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(self.bg))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(self.fg))
+        palette.setColor(QPalette.ColorRole.Base, QColor(self.panel_bg))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(self.bg))
+        palette.setColor(QPalette.ColorRole.Text, QColor(self.fg))
+        palette.setColor(QPalette.ColorRole.Button, QColor(self.panel_bg))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(self.fg))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(self.primary_bg))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor(self.primary_text))
+
+        strong_border = QColor("#AAAAAA") if self.is_dark else QColor("#222222")
+        palette.setColor(QPalette.ColorRole.Dark, strong_border)
+        palette.setColor(QPalette.ColorRole.Shadow, strong_border)
+        palette.setColor(QPalette.ColorRole.Mid, strong_border)
+
+        app.setPalette(palette)
+
+        # Update pyqtgraph if loaded
+        try:
+            import pyqtgraph as pg
+            pg.setConfigOption('background', self.panel_bg)
+            pg.setConfigOption('foreground', self.fg)
+        except Exception:
+            pass
+
+    def update(self, is_dark: bool):
+        """Updates the theme colors, applies palette globally, and emits theme_changed signal."""
+        self._set_colors(is_dark)
+        self.apply_to_application()
+        self.theme_changed.emit(is_dark)
+
+
+# Global singleton so all windows and dialogs read from and bind to the same instance
 theme = ThemeManager()
